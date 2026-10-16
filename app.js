@@ -226,7 +226,7 @@ const COMPLETION_STATUSES = ["모뎀설치", "작업불가", "재방문"];
 const LOW_VOLTAGE_STATUS_OPTIONS = [
   { value: "MKAMI", color: "red", icon: "🔴" },
   { value: "PPA", color: "blue", icon: "🔵" },
-  { value: "기타", color: "pink", icon: "●" },
+  { value: "기타", color: "yellow", icon: "🟡" },
   { value: "긴급", color: "black", icon: "⚫" },
   { value: "점검", color: "orange", icon: "🟠" },
   { value: "험로", color: "purple", icon: "🟣" },
@@ -2006,7 +2006,7 @@ function getGroupColor(group) {
     if (statuses.includes("점검")) return "orange";
     if (statuses.includes("MKAMI")) return "red";
     if (statuses.includes("PPA")) return "blue";
-    if (statuses.includes("기타")) return activeWorkType === "low_voltage" ? "pink" : "gray";
+    if (statuses.includes("기타")) return activeWorkType === "low_voltage" ? "yellow" : "gray";
     return null;
   }
 
@@ -2057,7 +2057,7 @@ function getMarkerFill(color) {
   const fillMap = {
     red: "#ef4444",
     orange: activeWorkType === "reinforcement" ? "#8b5cf6" : "#f97316",
-    yellow: "#facc15",
+    yellow: activeWorkType === "low_voltage" ? "#eab308" : "#facc15",
     green: "#22c55e",
     brown: "#92400e",
     black: "#111111",
@@ -2071,13 +2071,14 @@ function getMarkerFill(color) {
 }
 
 function renderStatusDot(color) {
-  return `<span aria-hidden="true" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${getMarkerFill(color)};vertical-align:middle;margin-right:4px;"></span>`;
+  // 모든 상태 아이콘에 같은 크기와 음영을 적용해 OS 이모지와 단색 원의 차이를 없앱니다.
+  return `<span aria-hidden="true" class="kdn-status-dot" style="display:inline-block;width:12px;height:12px;border-radius:50%;background-color:${getMarkerFill(color)};background-image:radial-gradient(circle at 28% 22%,rgba(255,255,255,.62) 0%,rgba(255,255,255,.18) 33%,rgba(255,255,255,0) 62%),linear-gradient(150deg,rgba(0,0,0,0) 45%,rgba(0,0,0,.18) 100%);vertical-align:-1px;margin-right:5px;"></span>`;
 }
 
 function getStatusTextColor(status) {
   const value = normalizeComparableStatus(status);
   if (value === "재방문") return getMarkerFill("teal");
-  if (activeWorkType === "low_voltage" && value === "기타") return getMarkerFill("pink");
+  if (activeWorkType === "low_voltage" && value === "기타") return getMarkerFill("yellow");
   return "#374151";
 }
 
@@ -2508,7 +2509,7 @@ function updateStatusSummary(items) {
   if (counts.black) parts.push(`⚫ ${counts.black}`);
   if (counts.red) parts.push(`🔴 ${counts.red}`);
   if (counts.orange) parts.push(activeWorkType === "reinforcement" ? `🟣 ${counts.orange}` : `🟠 ${counts.orange}`);
-  if (counts.yellow) parts.push(`🟡 ${counts.yellow}`);
+  if (counts.yellow) parts.push(activeWorkType === "low_voltage" ? `${renderStatusDot("yellow")}${counts.yellow}` : `🟡 ${counts.yellow}`);
   if (counts.purple) parts.push(`🟣 ${counts.purple}`);
   if (counts.green) parts.push(`🟢 ${counts.green}`);
   if (counts.gray) parts.push(`⚪ ${counts.gray}`);
@@ -3069,7 +3070,7 @@ function infoRowsWithIndividualCopy(label, values, copyLabel) {
         <div style="flex:1;word-break:break-word;">
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
             <strong>${escapeHtml(meter)}</strong>
-            ${item.status ? `<span style="font-size:11px;color:${getStatusTextColor(item.status)};">${escapeHtml(getStatusOptionLabel(item.status))}</span>` : ""}
+            ${item.status ? `<span style="font-size:11px;color:#475569;">${renderStatusPickerLabel({ value: item.status, textContent: getStatusOptionLabel(item.status) })}</span>` : ""}
           </div>
           ${apt ? `<div style="font-size:12px;color:#555;">공동주택명: ${escapeHtml(apt)}</div>` : ``}
           ${store ? `<div style="font-size:12px;color:#555;">상호명: ${escapeHtml(store)}</div>` : ``}
@@ -3323,17 +3324,21 @@ function closeStatusPicker(restoreFocus = false) {
 
 function renderStatusPickerLabel(option) {
   const label = String(option?.textContent || "상태없음").trim();
-  const status = normalizeComparableStatus(option?.value || "");
-  const color = status === "재방문" ? "teal"
-    : activeWorkType === "low_voltage" && status === "기타" ? "pink" : null;
-  return color ? renderStatusDot(color) + escapeHtml(label.replace(/^●\s*/, "")) : escapeHtml(label);
+  const status = normalizeComparableStatus(normalizeStatus(option?.value || ""));
+  const color = getWorkStatusColor(status) || {
+    "긴급": "black", "초긴급": "red", "MKAMI": "red", "PPA": "blue",
+    "계기교체(1순위)": "red", "계기교체(2순위)": "orange", "계기교체(3순위)": "yellow",
+    "점검": "orange", "험로": "purple", "모뎀설치": "green", "작업불가": "brown", "재방문": "teal"
+  }[status];
+  const plainLabel = label.replace(/^[🔴🔵🟡🟠🟣🟢🟤⚫⚪●]\uFE0F?\s*/u, "");
+  return color ? renderStatusDot(color) + escapeHtml(plainLabel) : escapeHtml(label);
 }
 
 function updateStatusPickerButton(select, button) {
   const option = select.selectedOptions[0];
   button.innerHTML = `<span class="kdn-status-value">${renderStatusPickerLabel(option)}</span><span aria-hidden="true">▾</span>`;
   button.setAttribute("aria-label", `작업상태: ${option?.textContent.trim() || "상태없음"}`);
-  button.style.color = option?.style.color || "#374151";
+  button.style.color = "#374151";
 }
 
 function openStatusPicker(select, button, last = false) {
@@ -3353,7 +3358,7 @@ function openStatusPicker(select, button, last = false) {
     item.disabled = option.disabled;
     item.setAttribute("role", "option");
     item.setAttribute("aria-selected", String(option.selected));
-    item.style.color = option.style.color || "#374151";
+    item.style.color = "#374151";
     item.innerHTML = renderStatusPickerLabel(option);
     item.onclick = () => {
       const changed = select.value !== option.value;
