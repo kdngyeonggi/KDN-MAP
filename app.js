@@ -226,14 +226,18 @@ const COMPLETION_STATUSES = ["모뎀설치", "작업불가", "재방문"];
 const LOW_VOLTAGE_STATUS_OPTIONS = [
   { value: "MKAMI", color: "red", icon: "🔴" },
   { value: "PPA", color: "blue", icon: "🔵" },
-  { value: "기타", color: "gray", icon: "⚪" },
+  { value: "기타", color: "pink", icon: "●" },
   { value: "긴급", color: "black", icon: "⚫" },
   { value: "점검", color: "orange", icon: "🟠" },
   { value: "험로", color: "purple", icon: "🟣" },
   { value: "모뎀설치", color: "green", icon: "🟢" },
   { value: "작업불가", color: "brown", icon: "🟤" },
-  { value: "재방문", color: "teal", icon: "🔷" }
+  { value: "재방문", color: "teal", icon: "●" }
 ];
+
+const RELAY_TABLE_STATUS_OPTIONS = LOW_VOLTAGE_STATUS_OPTIONS.map(item =>
+  item.value === "기타" ? { value: "기타", color: "gray", icon: "⚪" } : item
+);
 
 const HIGH_VOLTAGE_STATUS_OPTIONS = [
   { value: "점검", color: "orange", icon: "🟠" },
@@ -242,12 +246,13 @@ const HIGH_VOLTAGE_STATUS_OPTIONS = [
   { value: "초긴급", color: "red", icon: "🔴" },
   { value: "모뎀설치", color: "green", icon: "🟢" },
   { value: "작업불가", color: "brown", icon: "🟤" },
-  { value: "재방문", color: "teal", icon: "🔷" }
+  { value: "재방문", color: "teal", icon: "●" }
 ];
 
 function getWorkStatusOptions() {
   if (activeWorkType === "high_voltage") return HIGH_VOLTAGE_STATUS_OPTIONS;
-  return usesLowVoltageStatuses() ? LOW_VOLTAGE_STATUS_OPTIONS : null;
+  if (activeWorkType === "low_voltage") return LOW_VOLTAGE_STATUS_OPTIONS;
+  return activeWorkType === "relay_table" ? RELAY_TABLE_STATUS_OPTIONS : null;
 }
 
 function getWorkStatusColor(status) {
@@ -259,11 +264,11 @@ function getWorkStatusColor(status) {
 function buildWorkStatusOptions(currentStatus) {
   const options = getWorkStatusOptions() || [];
   const legacy = currentStatus && !options.some(item => item.value === currentStatus)
-    ? `<option value="${escapeHtml(currentStatus)}" selected disabled>${escapeHtml(getStatusOptionLabel(currentStatus))} (기존 상태)</option>`
+    ? `<option value="${escapeHtml(currentStatus)}" style="color:${getStatusTextColor(currentStatus)}" selected disabled>${escapeHtml(getStatusOptionLabel(currentStatus))} (기존 상태)</option>`
     : "";
   return `<option value="" ${!currentStatus ? "selected" : ""}>상태없음</option>` + legacy +
     options.map(item =>
-      `<option value="${item.value}" ${currentStatus === item.value ? "selected" : ""}>${item.icon} ${item.value}</option>`
+      `<option value="${item.value}" style="color:${getStatusTextColor(item.value)}" ${currentStatus === item.value ? "selected" : ""}>${item.icon} ${item.value}</option>`
     ).join("");
 }
 
@@ -2001,7 +2006,7 @@ function getGroupColor(group) {
     if (statuses.includes("점검")) return "orange";
     if (statuses.includes("MKAMI")) return "red";
     if (statuses.includes("PPA")) return "blue";
-    if (statuses.includes("기타")) return "gray";
+    if (statuses.includes("기타")) return activeWorkType === "low_voltage" ? "pink" : "gray";
     return null;
   }
 
@@ -2044,10 +2049,11 @@ function groupHasThreePhase(group) {
 function getMarkerSize(selected, label, shape) {
   if (shape === "legacy") return selected ? 28 : 16;
   // 보강공사는 계기 수와 모양에 관계없이 같은 크기입니다.
-  return selected ? 26 : 22;
+  if (activeWorkType === "reinforcement") return selected ? 26 : 22;
+  return selected ? 28 : 16;
 }
 
-function svgMarker(color, selected = false, label = "", shape = "legacy") {
+function getMarkerFill(color) {
   const fillMap = {
     red: "#ef4444",
     orange: activeWorkType === "reinforcement" ? "#8b5cf6" : "#f97316",
@@ -2056,11 +2062,27 @@ function svgMarker(color, selected = false, label = "", shape = "legacy") {
     brown: "#92400e",
     black: "#111111",
     gray: "#6b7280",
+    pink: "#db2777",
     blue: "#2563eb",
     purple: "#7c3aed",
     teal: "#0891b2"
   };
-  const fill = fillMap[color] || fillMap.gray;
+  return fillMap[color] || fillMap.gray;
+}
+
+function renderStatusDot(color) {
+  return `<span aria-hidden="true" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${getMarkerFill(color)};vertical-align:middle;margin-right:4px;"></span>`;
+}
+
+function getStatusTextColor(status) {
+  const value = normalizeComparableStatus(status);
+  if (value === "재방문") return getMarkerFill("teal");
+  if (activeWorkType === "low_voltage" && value === "기타") return getMarkerFill("pink");
+  return "#374151";
+}
+
+function svgMarker(color, selected = false, label = "", shape = "legacy") {
+  const fill = getMarkerFill(color);
 
   if (shape !== "legacy") {
     const size = getMarkerSize(selected, label, shape);
@@ -2080,7 +2102,7 @@ function svgMarker(color, selected = false, label = "", shape = "legacy") {
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
       ${selected ? `<${geometry} fill="none" stroke="#0f172a" stroke-width="7" stroke-linejoin="round"/>` : ""}
       <${geometry} fill="${fill}" stroke="white" stroke-width="${selected ? 3 : 1.6}" stroke-linejoin="round"/>
-      <text x="${center}" y="${textY}" text-anchor="middle" dominant-baseline="middle" fill="${textFill}" font-size="${fontSize}" font-weight="900" font-family="Arial,sans-serif">${escapeHtml(label)}</text>
+      ${label ? `<text x="${center}" y="${textY}" text-anchor="middle" dominant-baseline="middle" fill="${textFill}" font-size="${fontSize}" font-weight="900" font-family="Arial,sans-serif">${escapeHtml(label)}</text>` : ""}
     </svg>`;
     return "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(svg);
   }
@@ -2116,13 +2138,29 @@ function getMarkerImage(color, selected = false, label = "", shape = "legacy") {
   }
   return markerImageCache.get(key);
 }
+function hasCompletedNonMkamiRow(group) {
+  if (activeWorkType !== "low_voltage") return false;
+  // 본인에게 보이는 계기만 판정합니다. MKAMI와 섞여도 다른 종류의 처리 결과를 우선합니다.
+  return getVisibleRowEntries(group).some(({ row, index }) => {
+    const original = normalizeStatus(row.k);
+    const current = normalizeComparableStatus(getRowStatus(group.n, index, row));
+    return original && original !== "MKAMI" && !COMPLETION_STATUSES.includes(original) &&
+      COMPLETION_STATUSES.includes(current);
+  });
+}
+
 function getGroupMarkerImage(group, color, selected = group.n === selectedMarkerGroupNo) {
   const threePhase = groupHasThreePhase(group);
   if (activeWorkType === "reinforcement") {
     // 분할 데이터는 rows.length에 전체 계기 수를 보존합니다.
     return getMarkerImage(color, selected, String(group.rows?.length || 0), threePhase ? "triangle" : "circle");
   }
-  return getMarkerImage(color, selected, threePhase ? "3" : "");
+  const label = threePhase ? "3" : "";
+  if (activeWorkType === "low_voltage") {
+    return getMarkerImage(color, selected, label, hasCompletedNonMkamiRow(group) ? "triangle" : "circle");
+  }
+  // 재방문은 선택 중에도 원형을 유지합니다. 보강공사 3상 판정은 위에서 먼저 적용합니다.
+  return getMarkerImage(color, selected, label, color === "teal" ? "circle" : "legacy");
 }
 function updateMarkerAppearance(marker, group, color = getGroupColor(group)) {
   if (!color) return;
@@ -2277,7 +2315,8 @@ function buildMultiSelect(dropdown, name, items, allLabel, onChange) {
     input.checked = prev.length ? prev.includes(item.value) : !!item.checked;
 
     const text = document.createElement("span");
-    text.textContent = item.label;
+    if (item.swatchColor) text.innerHTML = renderStatusDot(item.swatchColor) + escapeHtml(item.label);
+    else text.textContent = item.label;
 
     input.onchange = () => {
       if (item.value === "all" && input.checked) {
@@ -2319,17 +2358,17 @@ function buildStatusFilter() {
   const items = !options
     ? [
         { value: "all", label: "구분 전체", checked: true },
-        { value: "black", label: "⚫ 긴급", checked: false },
-        { value: "red", label: "🔴 계기교체(1순위)", checked: false },
-        { value: "orange", label: "🟣 계기교체(2순위)", checked: false },
-        { value: "yellow", label: "🟡 계기교체(3순위)", checked: false },
-        { value: "green", label: "🟢 모뎀설치", checked: false },
-        { value: "brown", label: "🟤 작업불가", checked: false },
-        { value: "teal", label: "🔷 재방문", checked: false }
+        { value: "black", label: "긴급", swatchColor: "black", checked: false },
+        { value: "red", label: "계기교체(1순위)", swatchColor: "red", checked: false },
+        { value: "orange", label: "계기교체(2순위)", swatchColor: "orange", checked: false },
+        { value: "yellow", label: "계기교체(3순위)", swatchColor: "yellow", checked: false },
+        { value: "green", label: "모뎀설치", swatchColor: "green", checked: false },
+        { value: "brown", label: "작업불가", swatchColor: "brown", checked: false },
+        { value: "teal", label: "재방문", swatchColor: "teal", checked: false }
       ]
     : [{ value: "all", label: "구분 전체", checked: true }].concat(
         options.map(item => ({
-          value: item.color, label: `${item.icon} ${item.value}`, checked: false
+          value: item.color, label: item.value, swatchColor: item.color, checked: false
         }))
       );
   buildMultiSelect(statusDropdown, "statusFilterCheck", items, "구분", refresh);
@@ -2459,7 +2498,7 @@ function updateStatusSummary(items) {
     statusSummaryEl.textContent = "";
     return;
   }
-  const counts = { blue: 0, black: 0, red: 0, orange: 0, yellow: 0, purple: 0, green: 0, gray: 0, brown: 0, teal: 0 };
+  const counts = { blue: 0, black: 0, red: 0, orange: 0, yellow: 0, purple: 0, green: 0, gray: 0, pink: 0, brown: 0, teal: 0 };
   (items || []).forEach(g => {
     const c = getGroupColor(g);
     if (c && counts[c] !== undefined) counts[c] += 1;
@@ -2473,9 +2512,10 @@ function updateStatusSummary(items) {
   if (counts.purple) parts.push(`🟣 ${counts.purple}`);
   if (counts.green) parts.push(`🟢 ${counts.green}`);
   if (counts.gray) parts.push(`⚪ ${counts.gray}`);
+  if (counts.pink) parts.push(`${renderStatusDot("pink")}${counts.pink}`);
   if (counts.brown) parts.push(`🟤 ${counts.brown}`);
-  if (counts.teal) parts.push(`🔷 ${counts.teal}`);
-  statusSummaryEl.textContent = parts.join("  ");
+  if (counts.teal) parts.push(`${renderStatusDot("teal")}${counts.teal}`);
+  statusSummaryEl.innerHTML = parts.join("  ");
 }
 
 
@@ -2680,6 +2720,46 @@ async function switchWorkType(type) {
   }
 }
 
+function syncMapTypeButtons(control = document.getElementById("kdnMapTypeControl")) {
+  if (!control || !map) return;
+  const type = map.getMapTypeId();
+  const satellite = type === kakao.maps.MapTypeId.HYBRID || type === kakao.maps.MapTypeId.SKYVIEW;
+  control.querySelectorAll("button[data-map-mode]").forEach(button => {
+    const selected = (button.dataset.mapMode === "satellite") === satellite;
+    button.setAttribute("aria-pressed", String(selected));
+  });
+}
+
+function setMapViewMode(mode) {
+  if (!map || !["roadmap", "satellite"].includes(mode)) return;
+  const type = mode === "satellite" ? kakao.maps.MapTypeId.HYBRID : kakao.maps.MapTypeId.ROADMAP;
+  if (map.getMapTypeId() !== type) map.setMapTypeId(type);
+  syncMapTypeButtons();
+}
+
+function createMapTypeControl() {
+  const control = document.createElement("div");
+  control.id = "kdnMapTypeControl";
+  control.className = "kdn-map-type";
+  control.setAttribute("role", "group");
+  control.setAttribute("aria-label", "지도 형태");
+  [["roadmap", "지도"], ["satellite", "위성"]].forEach(([mode, label]) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.mapMode = mode;
+    button.textContent = label;
+    button.title = mode === "satellite" ? "위성사진과 도로명·지명 보기" : "일반 지도 보기";
+    button.onclick = event => {
+      event.preventDefault();
+      event.stopPropagation();
+      setMapViewMode(mode);
+    };
+    control.appendChild(button);
+  });
+  syncMapTypeButtons(control);
+  return control;
+}
+
 function ensureUI() {
   const oldBar = document.getElementById("kdnControlBar");
   if (oldBar) oldBar.remove();
@@ -2696,6 +2776,16 @@ function ensureUI() {
         backdrop-filter: blur(6px);
       }
       .kdn-row { display:flex; gap:6px; align-items:center; }
+      .kdn-map-type {
+        display:flex;flex-shrink:0;gap:2px;height:38px;box-sizing:border-box;
+        padding:2px;border:1px solid #cbd5e1;border-radius:8px;background:#f1f5f9;
+      }
+      .kdn-map-type button {
+        border:none;border-radius:5px;background:transparent;color:#475569;
+        padding:0 10px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;
+      }
+      .kdn-map-type button[aria-pressed="true"] { background:#111827;color:#fff; }
+      .kdn-map-type button:focus-visible { outline:2px solid #2563eb;outline-offset:1px; }
       .kdn-input, .kdn-search-btn, .kdn-reset-btn, .kdn-multi-button {
         height: 38px; border: 1px solid #ddd; border-radius: 8px; background: #fff;
         font-size: 13px; box-sizing: border-box;
@@ -2822,6 +2912,7 @@ function ensureUI() {
   currentLocationButton.textContent = "현재위치";
   currentLocationButton.onclick = () => { moveToCurrentLocation(); };
 
+  row1.appendChild(createMapTypeControl());
   row1.appendChild(searchInput);
   row1.appendChild(searchButton);
   row1.appendChild(currentLocationButton);
@@ -2959,7 +3050,7 @@ function infoRowsWithIndividualCopy(label, values, copyLabel) {
         <div style="flex:1;word-break:break-word;">
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
             <strong>${escapeHtml(meter)}</strong>
-            ${item.status ? `<span style="font-size:11px;color:#475569;">${escapeHtml(getStatusOptionLabel(item.status))}</span>` : ""}
+            ${item.status ? `<span style="font-size:11px;color:${getStatusTextColor(item.status)};">${escapeHtml(getStatusOptionLabel(item.status))}</span>` : ""}
           </div>
           ${apt ? `<div style="font-size:12px;color:#555;">공동주택명: ${escapeHtml(apt)}</div>` : ``}
           ${store ? `<div style="font-size:12px;color:#555;">상호명: ${escapeHtml(store)}</div>` : ``}
@@ -3192,7 +3283,7 @@ function getStatusOptionLabel(status) {
     "계기교체(3순위)": "🟡",
     "모뎀설치": "🟢",
     "작업불가": "🟤",
-    "재방문": "🔷",
+    "재방문": "●",
     "PPA": "🔵",
     "초긴급": "🔴",
     "점검": "🟠",
@@ -3257,8 +3348,8 @@ function renderInfo(group) {
 
     // 모든 시트의 작업자 계정은 세 가지 작업 처리 결과 중에서 선택합니다.
     let statusOptionsHtml = !isAdminUser() ? `
-            ${currentStatus && !COMPLETION_STATUSES.includes(currentStatus) ? `<option value="${escapeHtml(currentStatus)}" selected disabled>${escapeHtml(getStatusOptionLabel(currentStatus))} (현재상태)</option>` : ""}
-            ${COMPLETION_STATUSES.map(status => `<option value="${status}" ${currentStatus === status ? "selected" : ""}>${getStatusOptionLabel(status)}</option>`).join("")}
+            ${currentStatus && !COMPLETION_STATUSES.includes(currentStatus) ? `<option value="${escapeHtml(currentStatus)}" style="color:${getStatusTextColor(currentStatus)}" selected disabled>${escapeHtml(getStatusOptionLabel(currentStatus))} (현재상태)</option>` : ""}
+            ${COMPLETION_STATUSES.map(status => `<option value="${status}" style="color:${getStatusTextColor(status)}" ${currentStatus === status ? "selected" : ""}>${getStatusOptionLabel(status)}</option>`).join("")}
       ` : getWorkStatusOptions() ? buildWorkStatusOptions(currentStatus) : `
             <option value="" ${!currentStatus ? "selected" : ""}>상태없음</option>
             <option value="긴급" ${currentStatus === "긴급" ? "selected" : ""}>⚫ 긴급</option>
@@ -3267,7 +3358,7 @@ function renderInfo(group) {
             <option value="계기교체(3순위)" ${currentStatus === "계기교체(3순위)" ? "selected" : ""}>🟡 계기교체(3순위)</option>
             <option value="모뎀설치" ${currentStatus === "모뎀설치" ? "selected" : ""}>🟢 모뎀설치</option>
             <option value="작업불가" ${currentStatus === "작업불가" ? "selected" : ""}>🟤 작업불가</option>
-            <option value="재방문" ${currentStatus === "재방문" ? "selected" : ""}>🔷 재방문</option>
+            <option value="재방문" style="color:${getStatusTextColor("재방문")}" ${currentStatus === "재방문" ? "selected" : ""}>● 재방문</option>
       `;
     if (uniqueStatuses.length > 1) {
       statusOptionsHtml = `<option value="" selected disabled>상태 혼합 (${escapeHtml(uniqueStatuses.join(" / "))})</option>` +
@@ -3290,7 +3381,7 @@ function renderInfo(group) {
           </button>
 
           <select onchange="changeGroupedStatus('${escapeHtml(group.n)}', '${indexList}', this.value)"
-            style="height:32px;border:1px solid #d1d5db;border-radius:8px;padding:0 8px;font-size:12px;background:#fff;">
+            style="height:32px;border:1px solid #d1d5db;border-radius:8px;padding:0 8px;font-size:12px;background:#fff;color:${uniqueStatuses.length === 1 ? getStatusTextColor(currentStatus) : "#374151"};">
             ${statusOptionsHtml}
           </select>
           ${isAdminUser() ? renderStatusChangeDetails(getBucketStatusChange(group, bucket)) : ""}
