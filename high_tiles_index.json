@@ -1,0 +1,1 @@
+{"step":0.125,"layout":"packed-v1","maxFileBytes":24500000,"grouping":"coordinate-v1","tiles":[{"id":"high_tile_part_0001","file":"high_tile_part_0001.json","minLat":36.9179127985362,"maxLat":37.5757594068213,"minLng":126.461789420341,"maxLng":127.734141758878,"count":1741,"rows":2620,"sizeBytes":2173565}],"workType":"high_voltage","sheet":"고압"}
