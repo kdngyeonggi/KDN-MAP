@@ -2857,12 +2857,30 @@ function ensureUI() {
       }
       .kdn-status-actions { margin-top:8px;display:flex;gap:6px;align-items:center;flex-wrap:nowrap; }
       .kdn-status-actions > button { flex-shrink:0;white-space:nowrap; }
-      .kdn-status-actions > select { min-width:0;width:150px;flex:0 1 150px; }
+      .kdn-status-actions > select, .kdn-status-actions > .kdn-status-select { min-width:0;width:150px;flex:0 1 150px; }
+      .kdn-status-select {
+        height:32px;border:1px solid #d1d5db;border-radius:8px;padding:0 8px;
+        font-size:12px;background:#fff;display:flex;align-items:center;justify-content:space-between;gap:6px;cursor:pointer;
+      }
+      .kdn-status-value { overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+      .kdn-status-select:focus-visible { outline:2px solid #0891b2;outline-offset:2px; }
+      .kdn-status-menu {
+        position:fixed;z-index:10020;box-sizing:border-box;max-height:272px;overflow-y:auto;
+        padding:4px;border:1px solid #cbd5e1;border-radius:8px;background:#fff;
+        box-shadow:0 4px 16px rgba(0,0,0,.18);font-family:inherit;overscroll-behavior:contain;
+      }
+      .kdn-status-menu > button {
+        display:block;width:100%;min-height:36px;border:1px solid transparent;border-radius:4px;
+        padding:7px 8px;background:#fff;text-align:left;font-size:12px;font-family:inherit;cursor:pointer;white-space:normal;
+      }
+      .kdn-status-menu > button[aria-selected="true"] { background:#f1f5f9; }
+      .kdn-status-menu > button:hover:not(:disabled), .kdn-status-menu > button:focus-visible { background:#e0f2fe;border-color:#7dd3fc;outline:none; }
+      .kdn-status-menu > button:disabled { opacity:.55;cursor:default; }
       .kdn-status-actions > .status-change-detail { flex-shrink:0;margin-left:auto;padding:6px 8px;font-size:11px; }
       @media (max-width: 360px) {
         .kdn-status-actions { gap:4px; }
         .kdn-status-actions > button { padding:7px 6px !important;font-size:11px !important; }
-        .kdn-status-actions > select { padding:0 2px !important;font-size:11px !important; }
+        .kdn-status-actions > select, .kdn-status-actions > .kdn-status-select { padding:0 2px !important;font-size:11px !important; }
         .kdn-status-actions > .status-change-detail { padding:5px 6px;font-size:10px; }
       }
       @media (max-width: 640px) {
@@ -2991,6 +3009,7 @@ function ensureInfoPanel() {
   return infoPanel;
 }
 function closeInfo() {
+  closeStatusPicker();
   const panel = ensureInfoPanel();
   panel.style.display = "none";
   panel.innerHTML = "";
@@ -3293,7 +3312,138 @@ function getStatusOptionLabel(status) {
   return icons[label] ? `${icons[label]} ${label}` : label;
 }
 
+// 기본 select의 팝업은 OS에 따라 option 색상을 무시하므로 상세창의 표시만 보완합니다.
+// 원래 select의 선택지, disabled 조건, change 이벤트는 그대로 사용합니다.
+let statusPickerCleanup = null;
+function closeStatusPicker(restoreFocus = false) {
+  const cleanup = statusPickerCleanup;
+  statusPickerCleanup = null;
+  if (cleanup) cleanup(restoreFocus);
+}
+
+function renderStatusPickerLabel(option) {
+  const label = String(option?.textContent || "상태없음").trim();
+  const status = normalizeComparableStatus(option?.value || "");
+  const color = status === "재방문" ? "teal"
+    : activeWorkType === "low_voltage" && status === "기타" ? "pink" : null;
+  return color ? renderStatusDot(color) + escapeHtml(label.replace(/^●\s*/, "")) : escapeHtml(label);
+}
+
+function updateStatusPickerButton(select, button) {
+  const option = select.selectedOptions[0];
+  button.innerHTML = `<span class="kdn-status-value">${renderStatusPickerLabel(option)}</span><span aria-hidden="true">▾</span>`;
+  button.setAttribute("aria-label", `작업상태: ${option?.textContent.trim() || "상태없음"}`);
+  button.style.color = option?.style.color || "#374151";
+}
+
+function openStatusPicker(select, button, last = false) {
+  const wasOpen = button.getAttribute("aria-expanded") === "true";
+  closeStatusPicker();
+  if (wasOpen || !select.isConnected) return;
+  const menu = document.createElement("div");
+  menu.id = "kdnStatusPickerMenu";
+  menu.className = "kdn-status-menu";
+  menu.setAttribute("role", "listbox");
+  menu.setAttribute("aria-label", "작업상태 선택");
+  const choices = [];
+  Array.from(select.options).filter(option => !option.hidden).forEach(option => {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.tabIndex = -1;
+    item.disabled = option.disabled;
+    item.setAttribute("role", "option");
+    item.setAttribute("aria-selected", String(option.selected));
+    item.style.color = option.style.color || "#374151";
+    item.innerHTML = renderStatusPickerLabel(option);
+    item.onclick = () => {
+      const changed = select.value !== option.value;
+      select.value = option.value;
+      updateStatusPickerButton(select, button);
+      closeStatusPicker(true);
+      if (changed) select.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+    menu.appendChild(item);
+    if (!item.disabled) choices.push(item);
+  });
+  document.body.appendChild(menu);
+  const rect = button.getBoundingClientRect();
+  const viewport = window.visualViewport;
+  const leftEdge = (viewport?.offsetLeft || 0) + 8;
+  const topEdge = (viewport?.offsetTop || 0) + 8;
+  const rightEdge = leftEdge + (viewport?.width || window.innerWidth) - 16;
+  const bottomEdge = topEdge + (viewport?.height || window.innerHeight) - 16;
+  const width = Math.min(Math.max(rect.width, 180), rightEdge - leftEdge);
+  const above = rect.top - topEdge - 4;
+  const below = bottomEdge - rect.bottom - 4;
+  const openAbove = below < Math.min(272, menu.scrollHeight) && above > below;
+  menu.style.width = `${width}px`;
+  menu.style.maxHeight = `${Math.max(44, Math.min(272, openAbove ? above : below))}px`;
+  menu.style.left = `${Math.max(leftEdge, Math.min(rect.left, rightEdge - width))}px`;
+  menu.style.top = `${openAbove ? Math.max(topEdge, rect.top - menu.offsetHeight - 4) : rect.bottom + 4}px`;
+  button.setAttribute("aria-expanded", "true");
+  button.setAttribute("aria-controls", menu.id);
+  const onOutside = event => {
+    if (!menu.contains(event.target) && !button.contains(event.target)) closeStatusPicker();
+  };
+  const onScroll = event => { if (!menu.contains(event.target)) closeStatusPicker(); };
+  const onResize = () => closeStatusPicker();
+  statusPickerCleanup = restoreFocus => {
+    document.removeEventListener("pointerdown", onOutside, true);
+    document.removeEventListener("scroll", onScroll, true);
+    window.removeEventListener("resize", onResize);
+    viewport?.removeEventListener("resize", onResize);
+    menu.remove();
+    button.setAttribute("aria-expanded", "false");
+    button.removeAttribute("aria-controls");
+    if (restoreFocus && button.isConnected) button.focus({ preventScroll: true });
+  };
+  document.addEventListener("pointerdown", onOutside, true);
+  document.addEventListener("scroll", onScroll, true);
+  window.addEventListener("resize", onResize);
+  viewport?.addEventListener("resize", onResize);
+  menu.onfocusout = event => {
+    if (!menu.contains(event.relatedTarget) && event.relatedTarget !== button) closeStatusPicker();
+  };
+  menu.onkeydown = event => {
+    if (event.key === "Escape") {
+      event.preventDefault(); event.stopPropagation(); closeStatusPicker(true);
+    } else if (event.key === "Tab") {
+      closeStatusPicker(true);
+    } else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key) && choices.length) {
+      event.preventDefault();
+      const index = choices.indexOf(document.activeElement);
+      const next = event.key === "Home" ? 0 : event.key === "End" ? choices.length - 1
+        : (index + (event.key === "ArrowUp" ? -1 : 1) + choices.length) % choices.length;
+      choices[next].focus({ preventScroll: true });
+      choices[next].scrollIntoView({ block: "nearest" });
+    }
+  };
+  const selected = choices.find(item => item.getAttribute("aria-selected") === "true");
+  (selected || (last ? choices[choices.length - 1] : choices[0]))?.focus({ preventScroll: true });
+}
+
+function enhanceStatusPickers(panel) {
+  panel.querySelectorAll(".kdn-status-actions > select").forEach(select => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "kdn-status-select";
+    button.setAttribute("aria-haspopup", "listbox");
+    button.setAttribute("aria-expanded", "false");
+    updateStatusPickerButton(select, button);
+    button.onclick = () => openStatusPicker(select, button);
+    button.onkeydown = event => {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault(); openStatusPicker(select, button, event.key === "ArrowUp");
+      }
+    };
+    select.before(button);
+    select.style.display = "none";
+  });
+}
+
+
 function renderInfo(group) {
+  closeStatusPicker();
   if (!canAccessGroup(group)) {
     closeInfo();
     return;
@@ -3428,6 +3578,7 @@ function renderInfo(group) {
     </div>
   `;
   panel.style.display = "flex";
+  enhanceStatusPickers(panel);
 }
 
 window.changeGroupedStatus = async function(groupNo, indexList, value) {
