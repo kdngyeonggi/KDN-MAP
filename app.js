@@ -1,0 +1,4311 @@
+import { RESTRICTED_ACCOUNT_MESSAGE, isTemporarilyRestrictedUser } from "./account-access.js?v=account-access-v44-20261030";
+import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
+import {
+  getAuth,
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  signOut
+} from "https://www.gstatic.com/firebasejs/11.0.0/firebase-auth.js";
+import {
+  getFirestore,
+  collection,
+  doc,
+  documentId,
+  query,
+  where,
+  onSnapshot,
+  setDoc,
+  addDoc,
+  getDocs,
+  writeBatch,
+  serverTimestamp
+} from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
+
+// TODO: Firebase 콘솔 > 프로젝트 설정 > 일반 > 웹 앱 Firebase 구성값으로 교체하세요.
+const firebaseConfig = {
+  apiKey: "AIzaSyDfpnGLUxcqY69szJCmbWE10s2Mv9xF7Cw",
+  authDomain: "kdn-map.firebaseapp.com",
+  projectId: "kdn-map",
+  storageBucket: "kdn-map.firebasestorage.app",
+  messagingSenderId: "774166998071",
+  appId: "1:774166998071:web:d99011e3487d86849e23b2",
+  measurementId: "G-DE4C2P3GKZ"
+};
+
+const firebaseApp = initializeApp(firebaseConfig);
+const auth = getAuth(firebaseApp);
+const db = getFirestore(firebaseApp);
+
+let currentUser = null;
+let unsubscribeOverrides = null;
+let authPanel = null;
+let firebaseReady = false;
+
+
+const AUTO_LOGOUT_MS = 3 * 60 * 60 * 1000; // 마지막 활동 기준 3시간
+const LAST_ACTIVITY_KEY = "kdn_last_activity_at_v1";
+let autoLogoutTimer = null;
+let autoLogoutCheckTimer = null;
+let autoLogoutBound = false;
+
+function setLastActivityNow() {
+  localStorage.setItem(LAST_ACTIVITY_KEY, String(Date.now()));
+}
+
+function getLastActivityTime() {
+  const saved = Number(localStorage.getItem(LAST_ACTIVITY_KEY) || "0");
+  return Number.isFinite(saved) && saved > 0 ? saved : 0;
+}
+
+function isInactivityExpired() {
+  const last = getLastActivityTime();
+  if (!last) return false;
+  return Date.now() - last >= AUTO_LOGOUT_MS;
+}
+
+async function logoutByInactivity() {
+  if (!currentUser) return;
+  try {
+    alert("3시간 동안 활동이 없어 자동 로그아웃됩니다.");
+    localStorage.removeItem(LAST_ACTIVITY_KEY);
+    await signOut(auth);
+  } catch (e) {
+    window.location.replace("login.html?next=index.html");
+  }
+}
+
+function scheduleAutoLogout() {
+  if (autoLogoutTimer) clearTimeout(autoLogoutTimer);
+  if (!currentUser) return;
+
+  const last = getLastActivityTime();
+  if (!last) {
+    setLastActivityNow();
+  }
+
+  const elapsed = Date.now() - getLastActivityTime();
+  const remaining = AUTO_LOGOUT_MS - elapsed;
+
+  if (remaining <= 0) {
+    logoutByInactivity();
+    return;
+  }
+
+  autoLogoutTimer = setTimeout(logoutByInactivity, remaining);
+}
+
+function checkInactivityLogout() {
+  if (!currentUser) return;
+  if (isInactivityExpired()) {
+    logoutByInactivity();
+  } else {
+    scheduleAutoLogout();
+  }
+}
+
+function markUserActivity() {
+  if (!currentUser) return;
+  if (isInactivityExpired()) {
+    logoutByInactivity();
+    return;
+  }
+  setLastActivityNow();
+  scheduleAutoLogout();
+}
+
+function startInactivityLogout() {
+  // 새로고침/재접속 시에도 기존 마지막 활동 시간이 3시간을 넘었으면 바로 로그아웃합니다.
+  const last = getLastActivityTime();
+  if (last && Date.now() - last >= AUTO_LOGOUT_MS) {
+    logoutByInactivity();
+    return;
+  }
+
+  if (!last) {
+    setLastActivityNow();
+  }
+
+  if (!autoLogoutBound) {
+    ["click", "touchstart", "keydown", "scroll"].forEach(eventName => {
+      window.addEventListener(eventName, markUserActivity, { passive: true });
+    });
+
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) checkInactivityLogout();
+    });
+
+    window.addEventListener("focus", checkInactivityLogout);
+    window.addEventListener("storage", (e) => {
+      if (e.key === LAST_ACTIVITY_KEY) scheduleAutoLogout();
+    });
+
+    autoLogoutBound = true;
+  }
+
+  scheduleAutoLogout();
+
+  if (autoLogoutCheckTimer) clearInterval(autoLogoutCheckTimer);
+  autoLogoutCheckTimer = setInterval(checkInactivityLogout, 60 * 1000);
+}
+
+function stopInactivityLogout() {
+  if (autoLogoutTimer) clearTimeout(autoLogoutTimer);
+  if (autoLogoutCheckTimer) clearInterval(autoLogoutCheckTimer);
+  autoLogoutTimer = null;
+  autoLogoutCheckTimer = null;
+  localStorage.removeItem(LAST_ACTIVITY_KEY);
+}
+
+
+let map;
+let tileMeta = [];
+let branchMeta = [];
+let loadedTiles = new Map();
+let loadingTiles = new Map();
+let groupIndexDirty = false;
+let refreshGeneration = 0;
+let groups = [];
+let markers = [];
+
+const DEFAULT_CENTER = { lat: 37.275, lng: 127.009 };
+const DEFAULT_LEVEL = 9;
+const MIN_LEVEL_ALL = 7;
+const MAX_MARKERS_ALL = 5000;
+const MAX_MARKERS_BRANCH = 12000;
+const STORAGE_KEY = "kdn_status_overrides_v1";
+const MEMO_STORAGE_KEY = "kdn_marker_memos_v1";
+
+function withDataVersion(file) {
+  const version = sessionStorage.getItem("kdn_data_version_v1") || String(Date.now());
+  sessionStorage.setItem("kdn_data_version_v1", version);
+  const sep = String(file).includes("?") ? "&" : "?";
+  return `${file}${sep}v=${encodeURIComponent(version)}`;
+}
+
+async function fetchJsonFresh(file) {
+  const response = await fetch(withDataVersion(file), { cache: "no-store" });
+  if (!response.ok) throw new Error(`JSON 로드 실패: ${file}`);
+  return response.json();
+}
+
+const REGION_BRANCHES = {
+  "1권역": ["경기본부직할", "오산지사", "서수원지사"],
+  "2권역": ["광명지사", "안산지사", "안양지사"],
+  "3권역": ["평택지사", "서평택지사", "안성지사", "화성지사"],
+  "4권역": ["성남지사", "광주지사", "하남지사"],
+  "5권역": ["이천지사", "여주지사", "서용인지사", "동용인지사"]
+};
+
+
+const WORK_TYPES = {
+  reinforcement: { label: "보강공사", prefix: "" },
+  low_voltage: { label: "저압", prefix: "low_" },
+  high_voltage: { label: "고압", prefix: "high_" },
+  relay_table: { label: "중계표", prefix: "relay_" }
+};
+
+const REINFORCEMENT_ADMINS = ["이덕용", "허경민", "홍창수", "어인신"];
+const LOW_VOLTAGE_ADMINS = ["장기선", "문준엽", "박지나", "이성범"];
+const LOW_VOLTAGE_WORKERS = ["이주호", "이준영", "원기연", "이준기", "한현우", "박원성", "박인동", "서준호", "이혁수", "최현도", "김영준", "원후선", "유창욱", "윤인수", "조규재", "한국현", "홍종우", "장현봉", "박상민", "김광신", "홍경진", "김동희", "안시영", "윤재혁", "최길준", "이성찬", "한상민", "이재학", "임정우"];
+const HIGH_VOLTAGE_ADMINS = ["홍승표", "박한결"];
+const HIGH_VOLTAGE_WORKERS = ["장대희", "김민찬", "김경민", "최창원", "박많이", "정현철", "김승원", "박현창", "유상욱", "이길선", "이철희", "최인식", "홍은철", "원유진"];
+const RELAY_TABLE_WORKERS = ["이철규"];
+const FULL_SCOPE_ADMINS = [
+  "김우진", "유병걸", "채수철", "유선길"
+];
+
+let activeWorkType = "reinforcement";
+
+// 저압과 중계표의 마커, 필터, 상태 선택을 같은 기준으로 표시합니다.
+function usesLowVoltageStatuses(type = activeWorkType) {
+  return type === "low_voltage" || type === "relay_table";
+}
+
+const COMPLETION_STATUSES = ["모뎀설치", "작업불가", "재방문"];
+
+const LOW_VOLTAGE_STATUS_OPTIONS = [
+  { value: "MKAMI", color: "red", icon: "🔴" },
+  { value: "사전협의", color: "blue", icon: "🔵" },
+  { value: "기타", color: "yellow", icon: "🟡" },
+  { value: "긴급", color: "black", icon: "⚫" },
+  { value: "점검", color: "orange", icon: "🟠" },
+  { value: "험로", color: "purple", icon: "🟣" },
+  { value: "모뎀설치", color: "green", icon: "🟢" },
+  { value: "작업불가", color: "brown", icon: "🟤" },
+  { value: "재방문", color: "teal", icon: "●" }
+];
+
+const RELAY_TABLE_STATUS_OPTIONS = LOW_VOLTAGE_STATUS_OPTIONS.map(item => {
+  if (item.value === "사전협의") return { ...item, value: "PPA" };
+  return item.value === "기타" ? { value: "기타", color: "gray", icon: "⚪" } : item;
+});
+
+const HIGH_VOLTAGE_STATUS_OPTIONS = [
+  { value: "점검", color: "orange", icon: "🟠" },
+  { value: "험로", color: "purple", icon: "🟣" },
+  { value: "긴급", color: "black", icon: "⚫" },
+  { value: "초긴급", color: "red", icon: "🔴" },
+  { value: "모뎀설치", color: "green", icon: "🟢" },
+  { value: "작업불가", color: "brown", icon: "🟤" },
+  { value: "재방문", color: "teal", icon: "●" }
+];
+
+function getWorkStatusOptions() {
+  if (activeWorkType === "high_voltage") return HIGH_VOLTAGE_STATUS_OPTIONS;
+  if (activeWorkType === "low_voltage") return LOW_VOLTAGE_STATUS_OPTIONS;
+  return activeWorkType === "relay_table" ? RELAY_TABLE_STATUS_OPTIONS : null;
+}
+
+function getWorkStatusColor(status) {
+  // 이전 초긴급 기록은 원문을 유지하면서 긴급 필터/색상으로 함께 표시합니다.
+  if (usesLowVoltageStatuses() && status === "초긴급") return "black";
+  return getWorkStatusOptions()?.find(item => item.value === status)?.color || "";
+}
+
+function buildWorkStatusOptions(currentStatus) {
+  const options = getWorkStatusOptions() || [];
+  const legacy = currentStatus && !options.some(item => item.value === currentStatus)
+    ? `<option value="${escapeHtml(currentStatus)}" style="color:${getStatusTextColor(currentStatus)}" selected disabled>${escapeHtml(getStatusOptionLabel(currentStatus))} (기존 상태)</option>`
+    : "";
+  return `<option value="" ${!currentStatus ? "selected" : ""}>상태없음</option>` + legacy +
+    options.map(item =>
+      `<option value="${item.value}" style="color:${getStatusTextColor(item.value)}" ${currentStatus === item.value ? "selected" : ""}>${item.icon} ${item.value}</option>`
+    ).join("");
+}
+
+function getWorkTypeLabel(type = activeWorkType) {
+  return (WORK_TYPES[type] && WORK_TYPES[type].label) || "보강공사";
+}
+
+function getUserAssignedWorkType(userId = getCurrentUserId()) {
+  if (FULL_SCOPE_ADMINS.includes(userId)) return activeWorkType;
+  if (LOW_VOLTAGE_ADMINS.includes(userId) || LOW_VOLTAGE_WORKERS.includes(userId)) return "low_voltage";
+  if (HIGH_VOLTAGE_ADMINS.includes(userId) || HIGH_VOLTAGE_WORKERS.includes(userId)) return "high_voltage";
+  if (RELAY_TABLE_WORKERS.includes(userId)) return "relay_table";
+  return "reinforcement";
+}
+
+function isWorkTypeAdmin(userId = getCurrentUserId(), type = activeWorkType) {
+  if (FULL_SCOPE_ADMINS.includes(userId)) return true;
+  if (type === "reinforcement") return REINFORCEMENT_ADMINS.includes(userId);
+  if (type === "low_voltage") return LOW_VOLTAGE_ADMINS.includes(userId);
+  if (type === "high_voltage") return HIGH_VOLTAGE_ADMINS.includes(userId);
+  return false;
+}
+
+function canAccessWorkType(type, userId = getCurrentUserId()) {
+  return !!userId && !isTemporarilyRestrictedUser(userId) && !!WORK_TYPES[type] &&
+    (FULL_SCOPE_ADMINS.includes(userId) || getUserAssignedWorkType(userId) === type);
+}
+
+function getWorkersForActiveWorkType() {
+  if (activeWorkType === "low_voltage") return LOW_VOLTAGE_WORKERS.slice();
+  if (activeWorkType === "high_voltage") return HIGH_VOLTAGE_WORKERS.slice();
+  if (activeWorkType === "relay_table") return RELAY_TABLE_WORKERS.slice();
+  return [];
+}
+
+function resolveDataFile(file) {
+  const prefix = (WORK_TYPES[activeWorkType] && WORK_TYPES[activeWorkType].prefix) || "";
+  const name = String(file || "");
+  if (!prefix || name.startsWith(prefix)) return name;
+  return prefix + name;
+}
+
+const USER_PERMISSIONS = {
+  "김우진": {
+    "role": "admin",
+    "regions": []
+  },
+  "이덕용": {
+    "role": "admin",
+    "regions": []
+  },
+  "채수철": {
+    "role": "admin",
+    "regions": []
+  },
+  "박한결": {
+    "role": "admin",
+    "regions": []
+  },
+  "허경민": {
+    "role": "admin",
+    "regions": []
+  },
+  "어인신": {
+    "role": "admin",
+    "regions": []
+  },
+  "홍창수": {
+    "role": "admin",
+    "regions": []
+  },
+  "이종우": {
+    "role": "worker",
+    "regions": [
+      "1권역"
+    ]
+  },
+  "이창기": {
+    "role": "worker",
+    "regions": [
+      "1권역"
+    ]
+  },
+   "민철기": {
+    "role": "worker",
+    "regions": [
+      "5권역"
+    ]
+  },
+   "배성호": {
+    "role": "worker",
+    "regions": [
+      "5권역"
+    ]
+  },
+   "이명희": {
+    "role": "worker",
+    "regions": [
+      "4권역"
+    ]
+  },
+   "이종현": {
+    "role": "worker",
+    "regions": [
+      "4권역"
+    ]
+  },
+   "최윤재": {
+    "role": "worker",
+    "regions": [
+      "1권역"
+    ]
+  },
+   "이철규": {
+    "role": "worker",
+    "regions": [
+      "1권역"
+    ]
+  },
+   "송종민": {
+    "role": "worker",
+    "regions": [
+      "5권역"
+    ]
+  },
+   "정재경": {
+    "role": "worker",
+    "regions": [
+      "3권역"
+    ]
+  },
+  "권인": {
+    "role": "worker",
+    "regions": [
+      "3권역"
+    ]
+  },
+   "김원식": {
+    "role": "worker",
+    "regions": [
+      "3권역"
+    ]
+  },
+   "임정열": {
+    "role": "worker",
+    "regions": [
+      "3권역"
+    ]
+  },
+   "양낙연": {
+    "role": "worker",
+    "regions": [
+      "3권역"
+    ]
+  },
+   "김창헌": {
+    "role": "worker",
+    "regions": [
+      "3권역"
+    ]
+  },
+   "박효철": {
+    "role": "worker",
+    "regions": [
+      "3권역"
+    ]
+  },
+   "최호균": {
+    "role": "worker",
+    "regions": [
+      "3권역"
+    ]
+  },
+   "최환묵": {
+    "role": "worker",
+    "regions": [
+      "5권역"
+    ]
+  },
+   "이승종": {
+    "role": "worker",
+    "regions": [
+      "3권역"
+    ]
+  },
+   "오원식": {
+    "role": "worker",
+    "regions": [
+      "3권역"
+    ]
+  },
+   "주성진": {
+    "role": "worker",
+    "regions": [
+      "5권역"
+    ]
+  },
+   "임진기": {
+    "role": "worker",
+    "regions": [
+      "3권역"
+    ]
+  },
+   "이충현": {
+    "role": "worker",
+    "regions": [
+      "3권역"
+    ]
+  },
+   "황영돈": {
+    "role": "worker",
+    "regions": [
+      "3권역"
+    ]
+  },
+   "송민우": {
+    "role": "worker",
+    "regions": [
+      "4권역"
+    ]
+  },
+    "권택": {
+    "role": "worker",
+    "regions": [
+      "4권역"
+    ]
+  },
+    "박영순": {
+    "role": "worker",
+    "regions": [
+      "4권역"
+    ]
+  },
+    "박홍진": {
+    "role": "worker",
+    "regions": [
+      "4권역"
+    ]
+  },
+    "선경영": {
+    "role": "worker",
+    "regions": [
+      "5권역"
+    ]
+  },
+    "안정일": {
+    "role": "worker",
+    "regions": [
+      "4권역"
+    ]
+  },
+    "이동일": {
+    "role": "worker",
+    "regions": [
+      "4권역"
+    ]
+  },
+    "마경태": {
+    "role": "worker",
+    "regions": [
+      "5권역"
+    ]
+  },
+    "김준석": {
+    "role": "worker",
+    "regions": [
+      "1권역"
+    ]
+  },
+    "김정권": {
+    "role": "worker",
+    "regions": [
+      "1권역"
+    ]
+  },
+    "김태득": {
+    "role": "worker",
+    "regions": [
+      "5권역"
+    ]
+  },
+    "박성재": {
+    "role": "worker",
+    "regions": [
+      "5권역"
+    ]
+  },
+    "이은엽": {
+    "role": "worker",
+    "regions": [
+      "1권역"
+    ]
+  },
+    "이정훈": {
+    "role": "worker",
+    "regions": [
+      "1권역"
+    ]
+  },
+    "김남호": {
+    "role": "worker",
+    "regions": [
+      "5권역"
+    ]
+  },
+    "김종호": {
+    "role": "worker",
+    "regions": [
+      "3권역"
+    ]
+  },
+    "안경진": {
+    "role": "worker",
+    "regions": [
+      "3권역"
+    ]
+  },
+  "김진우": {
+    "role": "worker",
+    "regions": [
+      "5권역"
+    ]
+  }
+};
+let currentPermission = { role: "worker", regions: [] };
+
+function getLoginUserId(email) {
+  return String(email || "")
+    .trim()
+    .replace("@kdn.local", "")
+    .replace(/\s+/g, "")
+    .normalize("NFC");
+}
+
+function getCurrentUserId() {
+  return currentUser ? getLoginUserId(currentUser.email || "") : "";
+}
+
+function getUserPermission(email) {
+  const userId = getLoginUserId(email);
+  if (FULL_SCOPE_ADMINS.includes(userId)) {
+    return { role: "admin", regions: [] };
+  }
+  if (REINFORCEMENT_ADMINS.includes(userId) || LOW_VOLTAGE_ADMINS.includes(userId) || HIGH_VOLTAGE_ADMINS.includes(userId)) {
+    return { role: "admin", regions: [] };
+  }
+  if (LOW_VOLTAGE_WORKERS.includes(userId) || HIGH_VOLTAGE_WORKERS.includes(userId) || RELAY_TABLE_WORKERS.includes(userId)) {
+    return { role: "worker", regions: [] };
+  }
+  const matchedKey = Object.keys(USER_PERMISSIONS).find(key => String(key).replace(/\s+/g, "").normalize("NFC") === userId);
+  return matchedKey ? USER_PERMISSIONS[matchedKey] : { role: "worker", regions: [] };
+}
+
+function isAdminUser() {
+  return currentPermission && currentPermission.role === "admin" && isWorkTypeAdmin();
+}
+
+function canViewFirebaseAdminTab() {
+  return getCurrentUserId() === "김우진";
+}
+
+function getAllowedRegionNames() {
+  if (activeWorkType !== "reinforcement") return [];
+  if (isAdminUser()) return Object.keys(REGION_BRANCHES);
+  return Array.isArray(currentPermission.regions) ? currentPermission.regions : [];
+}
+
+function getAllowedBranchSet() {
+  // 저압/고압은 권역 제한 없이 해당 작업 지도 전체를 사용합니다.
+  if (activeWorkType !== "reinforcement") return null;
+  if (isAdminUser()) return null;
+  const branches = new Set();
+  getAllowedRegionNames().forEach(region => {
+    (REGION_BRANCHES[region] || []).forEach(branch => branches.add(branch));
+  });
+  return branches;
+}
+
+function isAssignmentRestricted() {
+  return activeWorkType === "low_voltage" && !isAdminUser();
+}
+
+function canAccessRow(row) {
+  if (!row) return false;
+  if (!isAssignmentRestricted()) return true;
+  const userId = getCurrentUserId();
+  if (!userId) return false;
+  const assignee = getLoginUserId(row.workAssignment);
+  return !assignee || assignee === userId;
+}
+
+function getVisibleRowEntries(group) {
+  // 원본 배열의 인덱스를 보존해야 기존 계기별 Firebase 상태와 연결됩니다.
+  return (group?.rows || []).flatMap((row, index) => canAccessRow(row) ? [{ row, index }] : []);
+}
+
+function canAccessGroup(group) {
+  if (!group || !canAccessWorkType(activeWorkType)) return false;
+  const groupType = group.workType || "reinforcement";
+  if (groupType !== activeWorkType) return false;
+  if (activeWorkType === "low_voltage") return (group.rows || []).some(canAccessRow);
+  if (activeWorkType !== "reinforcement") return true;
+  if (isAdminUser()) return true;
+  const allowedBranches = getAllowedBranchSet();
+  return !!(allowedBranches && getGroupBranches(group).some(branch => allowedBranches.has(branch)));
+}
+
+function applyPermissionDefaults() {
+  if (activeWorkType !== "reinforcement") return;
+  if (isAdminUser()) return;
+
+  const allowedRegions = getAllowedRegionNames();
+  document.querySelectorAll('input[name="regionFilterCheck"]').forEach(el => {
+    el.checked = allowedRegions.includes(el.value);
+    if (el.value === "all") el.checked = false;
+    el.disabled = !allowedRegions.includes(el.value);
+  });
+
+  document.querySelectorAll('input[name="branchFilterCheck"]').forEach(el => {
+    if (el.value === "all") {
+      el.checked = false;
+      el.disabled = true;
+      return;
+    }
+    const allowedBranches = getAllowedBranchSet();
+    el.disabled = !(allowedBranches && allowedBranches.has(el.value));
+    if (el.disabled) el.checked = false;
+  });
+
+  if (regionDropdown) setDropdownLabel(regionDropdown, getSelectedValues("regionFilterCheck"), "권역");
+  if (branchDropdown) setDropdownLabel(branchDropdown, getSelectedValues("branchFilterCheck"), "지사");
+}
+
+let currentGroupNo = null;
+let currentInfoOpenIndex = null;
+let infoPanel = null;
+
+let searchInput = null;
+let searchButton = null;
+let resetButton = null;
+let branchDropdown = null;
+let regionDropdown = null;
+let statusDropdown = null;
+let markerCountEl = null;
+let statusSummaryEl = null;
+let currentLocationButton = null;
+
+let groupMap = new Map();
+let rowGroupMap = new Map();
+let markerMap = new Map();
+let statusOverrides = loadOverrides();
+// 기존 실시간 스냅샷의 변경자/서버 시간을 재사용합니다. 별도 Firestore 조회는 하지 않습니다.
+let statusChangeDetails = {};
+let statusChangeDetailsReady = false;
+let statusExportReady = false;
+let workExportBusy = false;
+let workExportStatus = "";
+let workExportMessage = "";
+let markerMemos = loadMarkerMemos();
+let appliedSearchQuery = "";
+let currentLocationMarker = null;
+let selectedMarkerGroupNo = null;
+let latestUpdatedGroupNo = null;
+let latestUpdatedById = "";
+let latestUpdateOverlay = null;
+let latestUpdatesByUser = new Map();
+let adminWorkerLocationRegion = null;
+let adminWorkerLocationOverlays = [];
+let adminWorkerLocationButtonsBox = null;
+let firebaseSyncState = {
+  status: "연결 전",
+  lastSyncAt: null,
+  docCount: 0,
+  scope: ""
+};
+let adminDashboardPanel = null;
+let adminDashboardTab = "firebase";
+
+function loadOverrides() {
+  try {
+    return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+  } catch (e) {
+    return {};
+  }
+}
+function saveOverrides() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(statusOverrides));
+}
+
+function loadMarkerMemos() {
+  try {
+    const value = JSON.parse(localStorage.getItem(MEMO_STORAGE_KEY) || "{}");
+    return value && typeof value === "object" ? value : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function saveMarkerMemos() {
+  localStorage.setItem(MEMO_STORAGE_KEY, JSON.stringify(markerMemos || {}));
+}
+
+function isFirebaseConfigured() {
+  return firebaseConfig.apiKey && !String(firebaseConfig.apiKey).startsWith("YOUR_");
+}
+
+function safeDocId(value) {
+  return encodeURIComponent(String(value || "")).replaceAll(".", "%2E");
+}
+
+function getMarkerMemoDocKey(groupNo) {
+  return `markerMemo|${activeWorkType}|${String(groupNo || "")}`;
+}
+
+function normalizeRowKeyPart(value) {
+  return String(value || "")
+    .trim()
+    .replace(/\s+/g, "")
+    .replace(/[|]/g, "_");
+}
+
+function normalizeAddressGroupKey(address, roadAddress = "") {
+  // 번지까지를 주소 묶음 기준으로 사용하고, 뒤의 동·호수·상호명은 제외합니다.
+  const candidates = [address, roadAddress];
+  let fallback = "";
+
+  for (const raw of candidates) {
+    let text = String(raw || "").normalize("NFKC").replace(/\s+/g, " ").trim();
+    if (!text) continue;
+    if (!fallback) fallback = text;
+    text = text.replace(/^\s*(?:\[\d{5}\]|\(\d{5}\)|\d{5})\s*/, "");
+
+    const match = text.match(/(?:^|\s)(?:산\s*)?\d+(?:-\d*)?(?:번지)?(?=$|\s)/);
+    if (match) {
+      let base = text.slice(0, (match.index || 0) + match[0].length).trim();
+      base = base.replace(/번지$/, "");
+      base = base.replace(/-$/, "");
+      return base.replace(/\s+/g, "");
+    }
+  }
+
+  return fallback.replace(/\s+/g, "");
+}
+
+function getBaseAddressLabel(address, roadAddress = "") {
+  let fallback = "";
+  for (const raw of [address, roadAddress]) {
+    let text = String(raw || "").normalize("NFKC").replace(/\s+/g, " ").trim();
+    if (!text) continue;
+    text = text.replace(/^\s*(?:\[\d{5}\]|\(\d{5}\)|\d{5})\s*/, "");
+    if (!fallback) fallback = text;
+    const match = text.match(/(?:^|\s)(?:산\s*)?\d+(?:-\d*)?(?:번지)?(?=$|\s)/);
+    if (match) {
+      return text.slice(0, (match.index || 0) + match[0].length)
+        .trim().replace(/번지$/, "").replace(/-$/, "");
+    }
+  }
+  return fallback;
+}
+
+function getRepresentativeAddress(group) {
+  const addresses = new Map();
+  getVisibleRowEntries(group).forEach(({ row, index }) => {
+    if (!normalizeComparableStatus(getRowStatus(group.n, index, row))) return;
+    const label = getBaseAddressLabel(row.f, row.r);
+    if (!label) return;
+    const key = row.addressGroupKey || normalizeAddressGroupKey(row.f, row.r);
+    const item = addresses.get(key) || { label, count: 0 };
+    item.count += 1;
+    addresses.set(key, item);
+  });
+  // 같은 수량이면 엑셀에서 먼저 나온 주소를 사용합니다.
+  let representative = null;
+  addresses.forEach(item => {
+    if (!representative || item.count > representative.count) representative = item;
+  });
+  return representative?.label || "주소 정보 없음";
+}
+
+function getCommonInfoValue(rows, field, address = false) {
+  const values = rows.map(row => address ? getBaseAddressLabel(row[field]) : String(row[field] ?? "").trim());
+  return [...new Set(values.filter(Boolean))].join(" / ");
+}
+
+function showsContractNumbers() {
+  return activeWorkType === "low_voltage" || activeWorkType === "high_voltage";
+}
+
+function getGroupBranches(group) {
+  if (isAssignmentRestricted()) {
+    return [...new Set(getVisibleRowEntries(group)
+      .map(({ row }) => String(row.branch || group.branch || "").trim()).filter(Boolean))];
+  }
+  const values = Array.isArray(group?.branches) ? group.branches : [group?.branch];
+  return [...new Set(values.map(value => String(value || "").trim()).filter(Boolean))];
+}
+
+function getStableRowKey(groupNo, idx, row = {}) {
+  // 지도 마커의 좌표 ID와 분리하여 기존 계기별 Firebase 문서를 계속 사용합니다.
+  const storageGroupNo = row.statusGroupNo ?? groupNo;
+  const storageRowIndex = row.statusRowIndex ?? idx;
+  const meter = normalizeRowKeyPart(row.m);
+  const contract = normalizeRowKeyPart(row.c);
+  const address = normalizeRowKeyPart(row.f);
+  const transformer = normalizeRowKeyPart(row.n2);
+  const stableParts = [storageGroupNo, meter, contract, address, transformer].map(normalizeRowKeyPart);
+  const baseKey = (meter || contract || address || transformer)
+    ? `v2|${stableParts.join("|")}`
+    : `v2|${normalizeRowKeyPart(storageGroupNo)}|idx:${storageRowIndex}`;
+
+  // 기존 보강공사 Firebase key는 그대로 유지하여 기존 데이터와 100% 호환합니다.
+  if (activeWorkType === "reinforcement") return baseKey;
+  return `${activeWorkType}|${baseKey}`;
+}
+
+function isStableOverrideKey(key) {
+  return String(key || "").startsWith("v2|");
+}
+
+function ensureAuthPanel() {
+  if (authPanel) return authPanel;
+
+  authPanel = document.createElement("div");
+  authPanel.id = "kdnAuthPanel";
+  authPanel.style.position = "fixed";
+  authPanel.style.left = "0";
+  authPanel.style.right = "0";
+  authPanel.style.top = "0";
+  authPanel.style.bottom = "0";
+  authPanel.style.zIndex = "10000";
+  authPanel.style.background = "rgba(17,24,39,0.72)";
+  authPanel.style.display = "none";
+  authPanel.style.alignItems = "center";
+  authPanel.style.justifyContent = "center";
+  authPanel.style.padding = "18px";
+  authPanel.style.boxSizing = "border-box";
+  document.body.appendChild(authPanel);
+  return authPanel;
+}
+
+function renderAuthPanel(message = "") {
+  const panel = ensureAuthPanel();
+  const configured = isFirebaseConfigured();
+
+  panel.innerHTML = `
+    <div style="width:min(420px,100%);background:#fff;border-radius:18px;padding:20px;box-shadow:0 18px 48px rgba(0,0,0,0.25);font-family:-apple-system,BlinkMacSystemFont,'Apple SD Gothic Neo','Malgun Gothic',sans-serif;">
+      <div style="font-size:20px;font-weight:800;margin-bottom:6px;">KDN MAP 로그인</div>
+      <div style="font-size:13px;color:#4b5563;line-height:1.5;margin-bottom:14px;">
+        작업자별 상태 변경을 실시간으로 공유하려면 Firebase 로그인이 필요합니다.
+      </div>
+      ${!configured ? `
+        <div style="font-size:13px;line-height:1.55;background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;border-radius:12px;padding:10px;margin-bottom:12px;">
+          app.js 상단의 <strong>firebaseConfig</strong> 값을 실제 Firebase 웹 앱 구성값으로 먼저 교체하세요.
+        </div>
+      ` : ``}
+      <input id="kdnAuthEmail" type="text" placeholder="아이디 (예: kdn01)" autocomplete="username"
+        style="width:100%;height:42px;border:1px solid #d1d5db;border-radius:10px;padding:0 12px;box-sizing:border-box;margin-bottom:8px;font-size:14px;">
+      <input id="kdnAuthPassword" type="password" placeholder="비밀번호" autocomplete="current-password"
+        style="width:100%;height:42px;border:1px solid #d1d5db;border-radius:10px;padding:0 12px;box-sizing:border-box;margin-bottom:10px;font-size:14px;">
+      ${message ? `<div style="font-size:12px;color:#dc2626;margin-bottom:10px;">${escapeHtml(message)}</div>` : ``}
+      <button id="kdnAuthLoginBtn" type="button" ${configured ? "" : "disabled"}
+        style="width:100%;height:42px;border:none;border-radius:10px;background:${configured ? "#111827" : "#9ca3af"};color:#fff;font-size:14px;font-weight:700;cursor:${configured ? "pointer" : "not-allowed"};">
+        로그인
+      </button>
+    </div>
+  `;
+
+  const loginBtn = panel.querySelector("#kdnAuthLoginBtn");
+  if (loginBtn && configured) {
+    loginBtn.onclick = async () => {
+      const loginId = panel.querySelector("#kdnAuthEmail").value.trim();
+      if (isTemporarilyRestrictedUser(loginId)) {
+        renderAuthPanel(RESTRICTED_ACCOUNT_MESSAGE);
+        return;
+      }
+      const email = loginId.includes("@") ? loginId : `${loginId}@kdn.local`;
+      const password = panel.querySelector("#kdnAuthPassword").value;
+      try {
+        await signInWithEmailAndPassword(auth, email, password);
+      } catch (e) {
+        renderAuthPanel("로그인 실패: 아이디/비밀번호를 확인하세요.");
+      }
+    };
+  }
+
+  panel.style.display = "flex";
+}
+
+function hideAuthPanel() {
+  const panel = ensureAuthPanel();
+  panel.style.display = "none";
+}
+
+// Exact document IDs come from the same stable keys used by status writes.
+// This also finds existing records without an assignment-field migration.
+function getLowVoltageWorkerDocumentIds() {
+  const ids = new Set();
+  groups.forEach(group => {
+    if (!canAccessGroup(group)) return;
+    getVisibleRowEntries(group).forEach(({ row, index }) => {
+      ids.add(safeDocId(getStableRowKey(group.n, index, row)));
+    });
+    // A memo belongs to the marker, including markers shared by multiple workers.
+    ids.add(safeDocId(getMarkerMemoDocKey(group.n)));
+  });
+  return [...ids].sort();
+}
+
+function getStatusOverrideRefsForCurrentUser() {
+  if (!currentUser || !canAccessWorkType(activeWorkType)) return [];
+  const baseRef = collection(db, "statusOverrides");
+
+  if (isAssignmentRestricted()) {
+    const ids = getLowVoltageWorkerDocumentIds();
+    const refs = [];
+    // Firestore supports at most 30 disjunctions. Never fall back to all low-voltage records.
+    for (let i = 0; i < ids.length; i += 30) {
+      refs.push(query(baseRef, where(documentId(), "in", ids.slice(i, i + 30))));
+    }
+    return refs;
+  }
+
+  if (activeWorkType === "reinforcement") {
+    if (isAdminUser()) {
+      // Existing reinforcement rows have no workType field; their stable IDs start with v2|.
+      // Query those IDs and marker memos separately, retaining historic/off-map v2 records.
+      return ["v2|", "markerMemo|reinforcement|"].map(prefix => {
+        const start = safeDocId(prefix);
+        return query(baseRef, where(documentId(), ">=", start),
+          where(documentId(), "<", start + "\uf8ff"));
+      });
+    }
+    const allowedBranches = Array.from(getAllowedBranchSet() || []);
+    const refs = [];
+    for (let i = 0; i < allowedBranches.length; i += 10) {
+      refs.push(query(baseRef, where("branch", "in", allowedBranches.slice(i, i + 10))));
+    }
+    return refs;
+  }
+
+  return [query(baseRef, where("workType", "==", activeWorkType))];
+}
+
+function updateFirebaseSyncState(status, docCount) {
+  firebaseSyncState.status = status;
+  firebaseSyncState.lastSyncAt = new Date();
+  firebaseSyncState.docCount = Number(docCount || 0);
+  firebaseSyncState.scope = activeWorkType === "reinforcement"
+    ? (isAdminUser() ? "전체" : getAllowedRegionNames().join(", "))
+    : (isAssignmentRestricted() ? "저압 · 본인 할당 + 미할당" : `${getWorkTypeLabel()} 전체`);
+  renderAdminDashboardContent();
+}
+
+function formatDateTime(date) {
+  if (!date) return "-";
+  try {
+    return date.toLocaleString("ko-KR", { hour12: false });
+  } catch (e) {
+    return String(date);
+  }
+}
+
+function applyOverrideSnapshotToState(snapshot, next, latestRef, latestByUser, nextMemos = null, nextChanges = null) {
+  snapshot.forEach(d => {
+    const data = d.data() || {};
+    const docWorkType = String(data.workType || "reinforcement");
+    if (docWorkType !== activeWorkType) return;
+
+    if (data.kind === "markerMemo" || String(data.key || "").startsWith("markerMemo|")) {
+      if (nextMemos && typeof data.key === "string") {
+        const updatedAtMs = data.updatedAt && typeof data.updatedAt.toMillis === "function"
+          ? data.updatedAt.toMillis()
+          : 0;
+        nextMemos[data.key] = {
+          text: String(data.memo ?? data.text ?? ""),
+          groupNo: String(data.groupNo || ""),
+          updatedAtMs,
+          updatedByEmail: String(data.updatedByEmail || ""),
+          updatedByUid: String(data.updatedByUid || "")
+        };
+      }
+      return;
+    }
+
+    if (typeof data.key === "string") {
+      next[data.key] = normalizeStatus(data.status || "");
+
+      const updatedByEmail = String(data.updatedByEmail || "");
+      const userId = getDisplayUserId(updatedByEmail);
+      const updatedAtMs = data.updatedAt && typeof data.updatedAt.toMillis === "function"
+        ? data.updatedAt.toMillis()
+        : 0;
+
+      if (nextChanges) {
+        nextChanges[data.key] = {
+          status: next[data.key],
+          updatedByEmail,
+          updatedAtMs,
+          pending: !!d.metadata?.hasPendingWrites,
+          meterNo: String(data.meterNo ?? ""),
+          contractNo: String(data.contractNo ?? ""),
+          address: String(data.address ?? ""),
+          groupNo: String(data.groupNo ?? "")
+        };
+      }
+
+      if (!latestRef.value || updatedAtMs > latestRef.value.updatedAtMs) {
+        latestRef.value = {
+          key: data.key,
+          groupNo: String(data.groupNo || ""),
+          updatedByEmail,
+          updatedAtMs
+        };
+      }
+
+      if (userId) {
+        const prev = latestByUser.get(userId);
+        if (!prev || updatedAtMs > prev.updatedAtMs) {
+          latestByUser.set(userId, {
+            key: data.key,
+            groupNo: String(data.groupNo || ""),
+            userId,
+            branch: String(data.branch || ""),
+            address: String(data.address || ""),
+            updatedAtMs
+          });
+        }
+      }
+    }
+  });
+}
+
+function applySyncedOverrideState(next, latest, latestByUser = new Map(), nextMemos = null, nextChanges = {}) {
+  statusOverrides = next;
+  statusChangeDetails = nextChanges;
+  statusChangeDetailsReady = true;
+  latestUpdatesByUser = latestByUser;
+  if (nextMemos) markerMemos = nextMemos;
+  updateFirebaseSyncState("연결됨", Object.keys(next || {}).length);
+
+  if (latest && latest.groupNo) {
+    latestUpdatedGroupNo = latest.groupNo;
+    latestUpdatedById = getDisplayUserId(latest.updatedByEmail);
+  } else {
+    latestUpdatedGroupNo = null;
+    latestUpdatedById = "";
+  }
+
+  saveOverrides();
+  saveMarkerMemos();
+  refresh();
+
+  if (currentGroupNo) {
+    const group = groupMap.get(currentGroupNo);
+    if (group) renderInfo(group);
+  }
+}
+
+let overrideSyncGeneration = 0;
+
+function stopOverrideSync() {
+  overrideSyncGeneration += 1;
+  if (unsubscribeOverrides) unsubscribeOverrides();
+  unsubscribeOverrides = null;
+  statusExportReady = false;
+}
+
+async function startOverrideSync() {
+  stopOverrideSync();
+  const generation = overrideSyncGeneration;
+  const uid = currentUser?.uid;
+  const type = activeWorkType;
+  const dataset = loadedTiles;
+  const isCurrent = () => !!uid && currentUser?.uid === uid &&
+    activeWorkType === type && loadedTiles === dataset && overrideSyncGeneration === generation;
+  let closed = false;
+  let flushTimer = null;
+  const unsubscribers = [];
+  const cleanup = () => {
+    closed = true;
+    if (flushTimer !== null) clearTimeout(flushTimer);
+    unsubscribers.forEach(fn => fn());
+  };
+  unsubscribeOverrides = cleanup;
+  workExportMessage = "";
+  statusOverrides = {};
+  statusChangeDetails = {};
+  statusChangeDetailsReady = false;
+  markerMemos = {};
+  latestUpdatesByUser = new Map();
+  latestUpdatedGroupNo = null;
+  latestUpdatedById = "";
+  saveOverrides();
+  saveMarkerMemos();
+  updateFirebaseSyncState("연결 중", 0);
+
+  const fail = (error) => {
+    if (closed || !isCurrent()) return;
+    cleanup();
+    statusExportReady = false;
+    updateFirebaseSyncState("오류", 0);
+    console.error("Firebase scoped synchronization failed", error);
+    alert("작업내역 동기화 실패: JSON 파일, Firebase 조회 권한과 네트워크를 확인한 뒤 새로고침하세요.\n" + (error?.message || ""));
+  };
+
+  try {
+    // Assignment scope must be built from ALL JSON tiles, not just the visible map.
+    if (isAssignmentRestricted()) await loadAllTiles();
+    if (closed || !isCurrent()) return;
+    const refs = getStatusOverrideRefsForCurrentUser();
+    if (!refs.length) {
+      statusChangeDetailsReady = true;
+      updateFirebaseSyncState("조회 대상 없음", 0);
+      refresh();
+      return;
+    }
+
+    const snapshotsByIndex = new Map();
+    const flush = () => {
+      flushTimer = null;
+      if (closed || !isCurrent() || snapshotsByIndex.size !== refs.length) return;
+      const next = {}, nextMemos = {}, nextChanges = {};
+      const latestRef = { value: null };
+      const latestByUser = new Map();
+      snapshotsByIndex.forEach(snap => {
+        applyOverrideSnapshotToState(snap, next, latestRef, latestByUser, nextMemos, nextChanges);
+      });
+      statusExportReady = [...snapshotsByIndex.values()]
+        .every(snap => !snap.metadata.fromCache && !snap.metadata.hasPendingWrites);
+      applySyncedOverrideState(next, latestRef.value, latestByUser, nextMemos, nextChanges);
+    };
+
+    refs.forEach((ref, idx) => {
+      if (closed || !isCurrent()) return;
+      const unsubscribe = onSnapshot(ref, { includeMetadataChanges: true }, (snapshot) => {
+        if (closed || !isCurrent()) return;
+        snapshotsByIndex.set(idx, snapshot);
+        // Do not expose partial results as a complete export; coalesce initial batches.
+        statusExportReady = false;
+        if (flushTimer === null) flushTimer = setTimeout(flush, 40);
+      }, fail);
+      if (closed) unsubscribe();
+      else unsubscribers.push(unsubscribe);
+    });
+  } catch (error) {
+    fail(error);
+  }
+}
+
+async function saveRemoteOverride(groupNo, idx, row, value) {
+  if (!currentUser) {
+    renderAuthPanel("로그인 후 상태를 변경할 수 있습니다.");
+    throw new Error("not-authenticated");
+  }
+
+  const group = groupMap.get(groupNo);
+  if (!canAccessGroup(group) || !Number.isInteger(idx) || group.rows?.[idx] !== row || !canAccessRow(row)) {
+    throw new Error("not-authorized");
+  }
+
+  const key = getStableRowKey(groupNo, idx, row);
+  const status = normalizeStatus(value);
+  latestUpdatedGroupNo = String(groupNo);
+  latestUpdatedById = getDisplayUserId(currentUser.email || "");
+
+  if (latestUpdatedById) {
+    latestUpdatesByUser.set(latestUpdatedById, {
+      key,
+      groupNo: String(groupNo),
+      userId: latestUpdatedById,
+      branch: String((row && row.branch) || (group && group.branch) || ""),
+      address: String((row && (row.f || row.r)) || ""),
+      updatedAtMs: Date.now()
+    });
+    renderAdminDashboardContent();
+  }
+  await setDoc(doc(db, "statusOverrides", safeDocId(key)), {
+    key,
+    groupNo: String(row?.statusGroupNo ?? groupNo),
+    branch: String((row && row.branch) || (group && group.branch) || ""),
+    rowIndex: Number(row?.statusRowIndex ?? idx),
+    meterNo: String((row && row.m) || ""),
+    contractNo: String((row && row.c) || ""),
+    address: String((row && row.f) || ""),
+    status,
+    ...(activeWorkType === "reinforcement" ? {} : { workType: activeWorkType }),
+    updatedAt: serverTimestamp(),
+    updatedByUid: currentUser.uid,
+    updatedByEmail: currentUser.email || ""
+  }, { merge: true });
+
+  await addDoc(collection(db, "statusLogs"), {
+    key,
+    groupNo: String(row?.statusGroupNo ?? groupNo),
+    branch: String((row && row.branch) || (group && group.branch) || ""),
+    rowIndex: Number(row?.statusRowIndex ?? idx),
+    meterNo: String((row && row.m) || ""),
+    contractNo: String((row && row.c) || ""),
+    address: String((row && row.f) || ""),
+    status,
+    ...(activeWorkType === "reinforcement" ? {} : { workType: activeWorkType }),
+    updatedAt: serverTimestamp(),
+    updatedByUid: currentUser.uid,
+    updatedByEmail: currentUser.email || ""
+  });
+}
+
+async function saveRemoteMarkerMemo(group, text) {
+  if (!currentUser) {
+    renderAuthPanel("로그인 후 메모를 저장할 수 있습니다.");
+    throw new Error("not-authenticated");
+  }
+  if (!canAccessGroup(group)) {
+    throw new Error("not-authorized");
+  }
+
+  const memoKey = getMarkerMemoDocKey(group.n);
+  const branches = getGroupBranches(group);
+  const allowedBranches = getAllowedBranchSet();
+  const branch = allowedBranches
+    ? (branches.find(value => allowedBranches.has(value)) || branches[0] || "")
+    : (branches[0] || group.branch || "");
+  await setDoc(doc(db, "statusOverrides", safeDocId(memoKey)), {
+    key: memoKey,
+    kind: "markerMemo",
+    workType: activeWorkType,
+    groupNo: String(group.n),
+    branch: String(branch),
+    branches,
+    memo: String(text || ""),
+    updatedAt: serverTimestamp(),
+    updatedByUid: currentUser.uid,
+    updatedByEmail: currentUser.email || ""
+  }, { merge: true });
+}
+
+function initAuthSync() {
+  if (!isFirebaseConfigured()) {
+    renderAuthPanel("Firebase 설정값을 확인하세요.");
+    return;
+  }
+
+  let restrictionRedirectPending = false;
+  onAuthStateChanged(auth, (user) => {
+    if (user) restrictionRedirectPending = isTemporarilyRestrictedUser(user.email || "");
+    currentUser = restrictionRedirectPending ? null : user;
+
+    if (!currentUser) {
+      if (restrictionRedirectPending) firebaseReady = false;
+      statusExportReady = false;
+      statusChangeDetails = {};
+      statusChangeDetailsReady = false;
+      stopInactivityLogout();
+      stopOverrideSync();
+      removeAdminDashboardButton();
+      removeAdminWorkerLocationButtons();
+      clearAdminWorkerLocationLabels();
+      closeAdminDashboard();
+      // 로그인 전용 페이지로 이동합니다. 기존 지도/필터/마커 로직은 변경하지 않습니다.
+      const next = encodeURIComponent("index.html");
+      const loginUrl = `login.html?next=${next}${restrictionRedirectPending ? "&restricted=1" : ""}`;
+      if (user && restrictionRedirectPending) {
+        // 저장된 로그인 정보로 index.html에 바로 들어온 경우도 제한합니다.
+        signOut(auth).catch(() => {}).finally(() => window.location.replace(loginUrl));
+      } else {
+        window.location.replace(loginUrl);
+      }
+      return;
+    }
+
+    currentPermission = getUserPermission(user.email || "");
+    const desiredWorkType = FULL_SCOPE_ADMINS.includes(getCurrentUserId()) ? "reinforcement" : getUserAssignedWorkType(getCurrentUserId());
+    const workTypeChangedAfterLogin = activeWorkType !== desiredWorkType;
+    activeWorkType = desiredWorkType;
+    hideAuthPanel();
+    firebaseReady = true;
+    startInactivityLogout();
+
+    // index.html은 로그인 상태를 알기 전에 보강공사 JSON을 먼저 읽을 수 있습니다.
+    // 저압/고압 계정은 로그인 확인 직후 자신의 작업 JSON을 반드시 다시 읽습니다.
+    if (workTypeChangedAfterLogin) {
+      reloadActiveWorkTypeData();
+      return;
+    }
+
+    startOverrideSync();
+    ensureUI();
+    updateWorkTypeUIVisibility();
+    applyPermissionDefaults();
+    renderLoginStatus();
+    renderAdminDashboardButton();
+    renderAdminWorkerLocationButtons();
+    refresh();
+  });
+}
+
+function renderLoginStatus() {
+  const old = document.getElementById("kdnLoginStatus");
+  if (old) old.remove();
+  if (!currentUser) return;
+
+  const box = document.createElement("div");
+  box.id = "kdnLoginStatus";
+  box.style.position = "fixed";
+  box.style.right = "10px";
+  box.style.bottom = "10px";
+  box.style.zIndex = "12";
+  box.style.background = "rgba(255,255,255,0.96)";
+  box.style.border = "1px solid #e5e7eb";
+  box.style.borderRadius = "999px";
+  box.style.padding = "6px 8px 6px 10px";
+  box.style.boxShadow = "0 4px 14px rgba(0,0,0,0.12)";
+  box.style.fontSize = "11px";
+  box.style.display = "flex";
+  box.style.alignItems = "center";
+  box.style.gap = "6px";
+  box.innerHTML = `
+    <span style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+      ${escapeHtml(getCurrentUserId() || "로그인됨")}
+      ${getCurrentUserId() === "김우진"
+        ? " · 개발자"
+        : getCurrentUserId() === "유병걸"
+          ? " · 총괄"
+          : (" · " + escapeHtml(getWorkTypeLabel()) + (isAdminUser() ? " · 관리자" : (activeWorkType === "reinforcement" ? " · " + escapeHtml(getAllowedRegionNames().join(", ") || "권한없음") : "")))}
+    </span>
+    <button id="kdnLogoutBtn" type="button" style="border:none;background:#111827;color:#fff;border-radius:999px;padding:4px 7px;font-size:11px;cursor:pointer;">로그아웃</button>
+  `;
+  document.body.appendChild(box);
+  box.querySelector("#kdnLogoutBtn").onclick = () => { stopInactivityLogout(); signOut(auth); };
+}
+
+
+function removeAdminDashboardButton() {
+  const old = document.getElementById("kdnAdminDashboardBtn");
+  if (old) old.remove();
+}
+
+function renderAdminDashboardButton() {
+  removeAdminDashboardButton();
+  if (!isAdminUser()) return;
+
+  const btn = document.createElement("button");
+  btn.id = "kdnAdminDashboardBtn";
+  btn.type = "button";
+  btn.textContent = "관리자";
+  btn.style.position = "fixed";
+  btn.style.right = "10px";
+  btn.style.bottom = "52px";
+  btn.style.zIndex = "13";
+  btn.style.border = "none";
+  btn.style.borderRadius = "999px";
+  btn.style.background = "#fee500";
+  btn.style.color = "#111827";
+  btn.style.fontSize = "12px";
+  btn.style.fontWeight = "900";
+  btn.style.padding = "8px 12px";
+  btn.style.boxShadow = "0 6px 18px rgba(0,0,0,0.18)";
+  btn.style.cursor = "pointer";
+  btn.onclick = openAdminDashboard;
+  document.body.appendChild(btn);
+  renderAdminWorkerLocationButtons();
+}
+
+function openAdminDashboard() {
+  if (!isAdminUser()) return;
+
+  if (!canViewFirebaseAdminTab()) {
+    adminDashboardTab = "workers";
+  }
+
+  if (!adminDashboardPanel) {
+    adminDashboardPanel = document.createElement("div");
+    adminDashboardPanel.id = "kdnAdminDashboard";
+    adminDashboardPanel.style.position = "fixed";
+    adminDashboardPanel.style.left = "0";
+    adminDashboardPanel.style.right = "0";
+    adminDashboardPanel.style.top = "0";
+    adminDashboardPanel.style.bottom = "0";
+    adminDashboardPanel.style.zIndex = "20000";
+    adminDashboardPanel.style.background = "rgba(17,24,39,0.52)";
+    adminDashboardPanel.style.display = "none";
+    adminDashboardPanel.style.alignItems = "center";
+    adminDashboardPanel.style.justifyContent = "center";
+    adminDashboardPanel.style.padding = "16px";
+    adminDashboardPanel.style.boxSizing = "border-box";
+    document.body.appendChild(adminDashboardPanel);
+  }
+
+  adminDashboardPanel.style.display = "flex";
+  renderAdminDashboardContent();
+}
+
+function closeAdminDashboard() {
+  if (adminDashboardPanel) {
+    adminDashboardPanel.style.display = "none";
+  }
+}
+
+function collectWorkExportRows(changes, memos, exportGroups, statusFilter, workLabel) {
+  const rowsByKey = new Map();
+  exportGroups.forEach(group => (group.rows || []).forEach((row, index) => {
+    const key = getStableRowKey(group.n, index, row);
+    if (!rowsByKey.has(key)) rowsByKey.set(key, { row, groups: new Set() });
+    rowsByKey.get(key).groups.add(String(group.n));
+  }));
+  return Object.entries(changes)
+    .filter(([, change]) => !statusFilter || change.status === statusFilter)
+    .sort(([a, x], [b, y]) => (y.updatedAtMs || 0) - (x.updatedAtMs || 0) || a.localeCompare(b))
+    .map(([key, change]) => {
+      const match = rowsByKey.get(key);
+      const row = match?.row;
+      const memoTexts = match ? [...new Set([...match.groups].map(groupNo =>
+        String(memos[getMarkerMemoDocKey(groupNo)]?.text || "")).filter(Boolean))] : [];
+      return [workLabel, String(row?.c ?? change.contractNo ?? ""),
+        String(row?.m ?? change.meterNo ?? ""), row ? getOriginalRowStatus(row) : "확인 불가",
+        String(change.status || ""),
+        getDisplayUserId(change.updatedByEmail),
+        change.updatedAtMs ? formatStatusChangeTime(change.updatedAtMs) : "",
+        memoTexts.join("\n\n"), String(row?.f || change.address || ""),
+        match ? "" : "현재 지도 데이터에 없는 기록 · 메모 연결 불가"];
+    });
+}
+
+async function exportWorkExcel() {
+  if (!isAdminUser() || !currentUser || workExportBusy) return;
+  if (!statusExportReady) {
+    workExportMessage = "상태 동기화가 완료된 뒤 다시 시도하세요.";
+    renderAdminDashboardContent();
+    return;
+  }
+  const type = activeWorkType;
+  const uid = currentUser.uid;
+  const loaded = loadedTiles;
+  const filter = workExportStatus;
+  const label = type === "relay_table" ? "보강공사_중계표" : getWorkTypeLabel(type);
+  const isCurrent = () => currentUser?.uid === uid && isAdminUser() &&
+    activeWorkType === type && loadedTiles === loaded;
+  workExportBusy = true;
+  workExportMessage = "계기와 메모를 연결하고 있습니다…";
+  renderAdminDashboardContent();
+  try {
+    // 지도 범위/검색/지사 필터에 관계없이 해당 파트 JSON을 읽습니다.
+    // 정적 JSON만 필요하며 Firestore getDocs/getDoc 또는 별도 구독은 하지 않습니다.
+    await loadAllTiles();
+    if (!isCurrent()) return;
+    if (!statusExportReady) throw new Error("상태 동기화를 확인한 뒤 다시 다운로드하세요.");
+    const rows = collectWorkExportRows(statusChangeDetails, markerMemos, groups, filter, label);
+    if (!rows.length) {
+      workExportMessage = "선택한 조건에 해당하는 상태변경 내역이 없습니다.";
+      return;
+    }
+    workExportMessage = `${rows.length.toLocaleString()}건의 엑셀을 만들고 있습니다…`;
+    renderAdminDashboardContent();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    if (!isCurrent()) return;
+    const workbook = createWorkExportWorkbook(rows);
+    const stamp = formatStatusChangeTime(Date.now()).replace(/[-:]/g, "").replace(" ", "_");
+    const url = URL.createObjectURL(workbook);
+    const anchor = document.createElement("a");
+    try {
+      anchor.href = url;
+      anchor.download = `KDN_MAP_${label}_${filter || "전체변경"}_${stamp}.xlsx`;
+      document.body.appendChild(anchor);
+      anchor.click();
+    } finally {
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    }
+    const unmatched = rows.filter(row => row[9]).length;
+    workExportMessage = `${rows.length.toLocaleString()}건 다운로드 요청 완료` +
+      (unmatched ? ` · 지도에 없는 ${unmatched.toLocaleString()}건도 포함했습니다. 엑셀의 비고를 확인하세요.` : "");
+  } catch (error) {
+    if (isCurrent()) workExportMessage = `다운로드 실패: ${error.message || "잠시 후 다시 시도하세요."}`;
+  } finally {
+    workExportBusy = false;
+    if (!isCurrent()) workExportMessage = "";
+    renderAdminDashboardContent();
+  }
+}
+
+// 외부 라이브러리/CDN 없이 표준 XLSX(OOXML + ZIP)를 생성합니다.
+// 모든 데이터 셀을 문자열로 저장해 계약/계기번호의 앞자리 0과 긴 번호를 보존합니다.
+function workExcelXmlText(value) {
+  const text = String(value ?? "");
+  if (text.length > 32767) throw new Error("엑셀 한 셀의 최대 글자 수(32,767자)를 넘는 내용이 있습니다.");
+  return text.replace(/_x[0-9a-fA-F]{4}_/g, match => "_x005F_" + match.slice(1))
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]/g,
+      char => `_x${char.charCodeAt(0).toString(16).padStart(4, "0")}_`)
+    .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;").replaceAll("'", "&apos;")
+    .replaceAll("\r", "&#13;");
+}
+
+function createWorkExportWorkbook(rows) {
+  if (rows.length > 1048575) throw new Error("엑셀 한 시트의 행 한도를 초과했습니다. 변경상태를 나눠 추출하세요.");
+  const header = ["파트", "계약번호", "계기번호", "기존상태", "작업결과", "작업자", "작업일자(한국시간)", "메모", "지번주소", "비고"];
+  const xmlStart = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+  const sheetRows = [header, ...rows].map((row, index) => {
+    const cells = row.map((value, col) => `<c r="${String.fromCharCode(65 + col)}${index + 1}" s="${index === 0 ? 1 : 0}" t="inlineStr"><is><t xml:space="preserve">${workExcelXmlText(value)}</t></is></c>`).join("");
+    return `<row r="${index + 1}"${index === 0 ? ' ht="24" customHeight="1"' : ""}>${cells}</row>`;
+  }).join("");
+  const sheet = xmlStart + `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:J${rows.length + 1}"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="18"/><cols>${[20,24,24,18,18,18,24,55,45,45].map((width,i)=>`<col min="${i+1}" max="${i+1}" width="${width}" customWidth="1"/>`).join("")}</cols><sheetData>${sheetRows}</sheetData><autoFilter ref="A1:J${rows.length+1}"/></worksheet>`;
+  const files = {
+    "[Content_Types].xml": xmlStart + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>',
+    "_rels/.rels": xmlStart + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
+    "xl/workbook.xml": xmlStart + '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="작업내역" sheetId="1" r:id="rId1"/></sheets></workbook>',
+    "xl/_rels/workbook.xml.rels": xmlStart + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>',
+    "xl/styles.xml": xmlStart + '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="맑은 고딕"/></font><font><b/><color rgb="FFFFFFFF"/><sz val="11"/><name val="맑은 고딕"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF1E3A5F"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="49" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf><xf numFmtId="49" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment vertical="center"/></xf></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>',
+    "xl/worksheets/sheet1.xml": sheet
+  };
+  return createWorkExcelZip(files);
+}
+
+function createWorkExcelZip(files) {
+  const encoder = new TextEncoder();
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let value = n;
+    for (let k = 0; k < 8; k++) value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+    table[n] = value >>> 0;
+  }
+  const parts = [], directory = [];
+  let offset = 0, directorySize = 0;
+  for (const [filename, xml] of Object.entries(files)) {
+    const name = encoder.encode(filename), data = encoder.encode(xml);
+    let crc = 0xffffffff;
+    for (const byte of data) crc = table[(crc ^ byte) & 255] ^ (crc >>> 8);
+    crc = (crc ^ 0xffffffff) >>> 0;
+    if (offset + data.length + name.length + 30 > 0xffffffff) throw new Error("엑셀 파일이 너무 큽니다. 변경상태별로 나눠 추출하세요.");
+    const local = new Uint8Array(30 + name.length), lv = new DataView(local.buffer);
+    lv.setUint32(0, 0x04034b50, true); lv.setUint16(4, 20, true); lv.setUint16(6, 0x800, true);
+    lv.setUint16(12, 33, true); lv.setUint32(14, crc, true);
+    lv.setUint32(18, data.length, true); lv.setUint32(22, data.length, true); lv.setUint16(26, name.length, true);
+    local.set(name, 30);
+    const central = new Uint8Array(46 + name.length), cv = new DataView(central.buffer);
+    cv.setUint32(0, 0x02014b50, true); cv.setUint16(4, 20, true); cv.setUint16(6, 20, true); cv.setUint16(8, 0x800, true);
+    cv.setUint16(14, 33, true); cv.setUint32(16, crc, true); cv.setUint32(20, data.length, true); cv.setUint32(24, data.length, true);
+    cv.setUint16(28, name.length, true); cv.setUint32(42, offset, true); central.set(name, 46);
+    parts.push(local, data); directory.push(central);
+    offset += local.length + data.length; directorySize += central.length;
+  }
+  const end = new Uint8Array(22), view = new DataView(end.buffer);
+  view.setUint32(0, 0x06054b50, true); view.setUint16(8, directory.length, true); view.setUint16(10, directory.length, true);
+  view.setUint32(12, directorySize, true); view.setUint32(16, offset, true);
+  return new Blob([...parts, ...directory, end], {type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
+}
+
+function getWorkersByRegion() {
+  const result = {};
+  Object.keys(REGION_BRANCHES).forEach(region => result[region] = []);
+
+  Object.entries(USER_PERMISSIONS).forEach(([name, info]) => {
+    if (!info || info.role !== "worker") return;
+    (info.regions || []).forEach(region => {
+      if (!result[region]) result[region] = [];
+      result[region].push(name);
+    });
+  });
+
+  Object.keys(result).forEach(region => result[region].sort((a, b) => a.localeCompare(b, "ko")));
+  return result;
+}
+
+function getWorkerLastUpdate(userId) {
+  return latestUpdatesByUser.get(userId) || null;
+}
+
+function findGroupForUpdate(update) {
+  if (!update) return null;
+  const currentGroupId = update.key && rowGroupMap.get(update.key);
+  return (currentGroupId && groupMap.get(currentGroupId)) || groupMap.get(update.groupNo) || null;
+}
+
+async function moveToUserLastMarker(userId) {
+  const update = getWorkerLastUpdate(userId);
+  if (!update || !update.groupNo) {
+    alert(`${userId} 작업자의 마지막 수정 위치가 아직 없습니다.`);
+    return;
+  }
+
+  let group = findGroupForUpdate(update);
+  if (!group) {
+    await loadAllTiles();
+    group = findGroupForUpdate(update);
+  }
+
+  if (!group) {
+    alert(`${userId} 작업자의 마지막 수정 마커를 현재 데이터에서 찾지 못했습니다.`);
+    return;
+  }
+
+  closeAdminDashboard();
+  selectedMarkerGroupNo = group.n;
+  currentGroupNo = group.n;
+  map.setCenter(new kakao.maps.LatLng(group.y, group.x));
+  if (map.getLevel() > 4) map.setLevel(4);
+  await refresh();
+  refreshMarkerSelection();
+  renderInfo(group);
+}
+
+function renderAdminDashboardContent() {
+  if (!adminDashboardPanel || adminDashboardPanel.style.display === "none") return;
+  if (!isAdminUser()) {
+    closeAdminDashboard();
+    return;
+  }
+
+  if (!canViewFirebaseAdminTab()) {
+    adminDashboardTab = "workers";
+  }
+
+  const statusColor = firebaseSyncState.status === "연결됨"
+    ? "#16a34a"
+    : (firebaseSyncState.status === "오류" ? "#dc2626" : "#ca8a04");
+
+  const tabsHtml = `
+    <div style="display:flex;gap:6px;margin-bottom:12px;">
+      ${canViewFirebaseAdminTab() ? `
+      <button type="button" id="adminTabFirebase"
+        style="flex:1;height:38px;border:none;border-radius:12px;font-weight:900;cursor:pointer;background:${adminDashboardTab === "firebase" ? "#111827" : "#f3f4f6"};color:${adminDashboardTab === "firebase" ? "#fff" : "#111827"};">
+        Firebase 상태
+      </button>
+      ` : ``}
+      <button type="button" id="adminTabWorkers"
+        style="flex:1;height:38px;border:none;border-radius:12px;font-weight:900;cursor:pointer;background:${adminDashboardTab === "workers" ? "#111827" : "#f3f4f6"};color:${adminDashboardTab === "workers" ? "#fff" : "#111827"};">
+        작업자 위치
+      </button>
+    </div>
+  `;
+
+  const bodyHtml = adminDashboardTab === "firebase" && canViewFirebaseAdminTab()
+    ? renderFirebaseStatusTab(statusColor)
+    : renderWorkerLocationTab();
+
+  adminDashboardPanel.innerHTML = `
+    <div style="width:min(560px,100%);max-height:82vh;background:#fff;border-radius:22px;box-shadow:0 24px 70px rgba(0,0,0,0.28);overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,'Apple SD Gothic Neo','Malgun Gothic',sans-serif;">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid #eef2f7;">
+        <div>
+          <div style="font-size:17px;font-weight:900;color:#111827;">관리자 대시보드</div>
+          <div style="font-size:11px;color:#6b7280;margin-top:3px;">관리자 전용 기능</div>
+        </div>
+        <button type="button" id="closeAdminDashboard"
+          style="width:34px;height:34px;border:none;border-radius:999px;background:#f3f4f6;font-size:18px;cursor:pointer;">×</button>
+      </div>
+      <div style="padding:14px 16px 16px;overflow-y:auto;max-height:calc(82vh - 64px);">
+        <div style="padding:12px;margin-bottom:12px;border:1px solid #bfdbfe;border-radius:12px;background:#eff6ff;">
+          <div style="font-size:13px;font-weight:800;margin-bottom:6px;">${escapeHtml(getWorkTypeLabel())} 작업내역 엑셀</div>
+          <div style="font-size:11px;color:#475569;margin-bottom:8px;">현재 파트의 상태변경 기록만 · 계기별 최종 변경내용과 현재 메모</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <select id="workExportStatus" ${workExportBusy ? "disabled" : ""} style="min-width:120px;height:36px;border:1px solid #cbd5e1;border-radius:8px;background:white;">
+              ${["", ...COMPLETION_STATUSES].map(value => `<option value="${escapeHtml(value)}" ${workExportStatus === value ? "selected" : ""}>${escapeHtml(value || "전체 변경상태")}</option>`).join("")}
+            </select>
+            <button id="exportWorkExcel" type="button" ${workExportBusy || !statusExportReady ? "disabled" : ""} style="height:36px;padding:0 12px;border:0;border-radius:8px;background:#1d4ed8;color:white;font-weight:800;cursor:pointer;">${workExportBusy ? "엑셀 준비 중…" : "엑셀 다운로드"}</button>
+          </div>
+          <div style="font-size:11px;color:#475569;margin-top:7px;" role="status">${escapeHtml(workExportMessage || (statusExportReady ? "" : "상태 동기화가 완료되면 다운로드할 수 있습니다."))}</div>
+        </div>
+        ${tabsHtml}
+        ${bodyHtml}
+      </div>
+    </div>
+  `;
+
+  adminDashboardPanel.querySelector("#closeAdminDashboard").onclick = closeAdminDashboard;
+  adminDashboardPanel.querySelector("#exportWorkExcel").onclick = exportWorkExcel;
+  adminDashboardPanel.querySelector("#workExportStatus").onchange = event => {
+    workExportStatus = event.target.value;
+    workExportMessage = "";
+  };
+  const firebaseTabBtn = adminDashboardPanel.querySelector("#adminTabFirebase");
+  if (firebaseTabBtn) {
+    firebaseTabBtn.onclick = () => {
+      adminDashboardTab = "firebase";
+      renderAdminDashboardContent();
+    };
+  }
+  const workersTabBtn = adminDashboardPanel.querySelector("#adminTabWorkers");
+  if (workersTabBtn) {
+    workersTabBtn.onclick = () => {
+      adminDashboardTab = "workers";
+      renderAdminDashboardContent();
+    };
+  }
+
+  renderFirebaseResetProgress();
+  adminDashboardPanel.querySelectorAll("[data-reset-worktype]").forEach(btn => {
+    btn.onclick = () => resetFirebaseOverridesFromAdmin(btn.getAttribute("data-reset-worktype"));
+  });
+
+  adminDashboardPanel.querySelectorAll("[data-admin-worker-region]").forEach(btn => {
+    btn.onclick = () => {
+      adminWorkerLocationRegion = btn.getAttribute("data-admin-worker-region");
+      renderAdminDashboardContent();
+      updateAdminRegionButtonState();
+    };
+  });
+
+  adminDashboardPanel.querySelectorAll("[data-worker-id]").forEach(btn => {
+    btn.onclick = () => moveToUserLastMarker(btn.getAttribute("data-worker-id"));
+  });
+}
+
+
+// Reset only the selected part's status documents; marker memos are retained.
+let firebaseResetBusy = false;
+let firebaseResetProgress = "";
+function renderFirebaseResetProgress() {
+  document.querySelectorAll("[data-reset-worktype]").forEach(button => {
+    button.disabled = firebaseResetBusy;
+    if (firebaseResetBusy) button.textContent = firebaseResetProgress;
+  });
+}
+function selectResetDocuments(documents, targetWorkType) {
+  return documents.filter(snapshot => {
+    const data = snapshot.data() || {};
+    return String(data.workType || "reinforcement") === targetWorkType &&
+      data.kind !== "markerMemo" && !String(data.key || "").startsWith("markerMemo|");
+  });
+}
+async function deleteResetDocuments(documents, onProgress) {
+  let deleted = 0;
+  async function commitChunk(chunk) {
+    const batch = writeBatch(db);
+    chunk.forEach(snapshot => batch.delete(snapshot.ref));
+    try {
+      await batch.commit();
+    } catch (error) {
+      // Rules may use per-document lookups: retry smaller atomic batches.
+      if (chunk.length > 1 && /permission-denied|resource-exhausted/.test(String(error.code))) {
+        const middle = Math.ceil(chunk.length / 2);
+        await commitChunk(chunk.slice(0, middle));
+        await commitChunk(chunk.slice(middle));
+        return;
+      }
+      throw error;
+    }
+    deleted += chunk.length;
+    onProgress(deleted, documents.length);
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
+  for (let offset = 0; offset < documents.length; offset += 200) {
+    await commitChunk(documents.slice(offset, offset + 200));
+  }
+  return deleted;
+}
+async function resetFirebaseOverridesFromAdmin(targetWorkType = activeWorkType) {
+  if (!isAdminUser() || !canViewFirebaseAdminTab()) {
+    alert("김우진 관리자만 초기화할 수 있습니다.");
+    return;
+  }
+  if (!WORK_TYPES[targetWorkType] || targetWorkType !== activeWorkType) {
+    alert("현재 선택한 파트만 초기화할 수 있습니다. 해당 파트로 이동한 뒤 다시 실행하세요.");
+    return;
+  }
+  if (firebaseResetBusy) return;
+  const workLabel = getWorkTypeLabel(targetWorkType);
+  if (!confirm(`${workLabel} Firebase 변경값을 초기화할까요?\n\n` +
+    "선택한 작업 종류의 statusOverrides 상태 변경값만 삭제됩니다.\n" +
+    "화면은 해당 작업의 최신 JSON 기준 상태로 돌아갑니다. 메모는 유지됩니다.\n\n" +
+    "이 작업은 되돌릴 수 없습니다.")) return;
+  if (!confirm(`정말로 ${workLabel} 변경값만 초기화하시겠습니까?`)) return;
+  firebaseResetBusy = true;
+  firebaseResetProgress = "초기화 대상 확인 중…";
+  renderFirebaseResetProgress();
+  let deletedCount = 0;
+  try {
+    // Legacy reinforcement records omit workType; retain collection scan for compatibility.
+    const ref = targetWorkType === "reinforcement"
+      ? collection(db, "statusOverrides")
+      : query(collection(db, "statusOverrides"), where("workType", "==", targetWorkType));
+    const snapshot = await getDocs(ref);
+    const documents = selectResetDocuments(snapshot.docs, targetWorkType);
+    await deleteResetDocuments(documents, (done, total) => {
+      deletedCount = done;
+      firebaseResetProgress = `초기화 ${done.toLocaleString()} / ${total.toLocaleString()}건`;
+      renderFirebaseResetProgress();
+    });
+    // Keep authoritative snapshot state. Do not erase concurrent new worker changes locally.
+    alert(`${workLabel} Firebase 변경값 초기화 완료\n삭제된 문서: ${deletedCount.toLocaleString()}개`);
+  } catch (error) {
+    alert(`초기화 중단: ${deletedCount.toLocaleString()}개 삭제 완료.\n` +
+      "Firebase 권한 또는 네트워크를 확인한 뒤 다시 실행하면 남은 기록을 처리합니다.");
+  } finally {
+    firebaseResetBusy = false;
+    firebaseResetProgress = "";
+    renderAdminDashboardContent();
+  }
+}
+
+function renderFirebaseStatusTab(statusColor) {
+  return `
+    <div style="border:1px solid #e5e7eb;border-radius:16px;padding:14px;background:#fafafa;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+        <span style="width:10px;height:10px;border-radius:999px;background:${statusColor};display:inline-block;"></span>
+        <strong style="font-size:15px;color:#111827;">${escapeHtml(firebaseSyncState.status)}</strong>
+      </div>
+      <div style="font-size:13px;line-height:1.9;color:#374151;">
+        <div><strong>마지막 동기화:</strong> ${escapeHtml(formatDateTime(firebaseSyncState.lastSyncAt))}</div>
+        <div><strong>동기화 범위:</strong> ${escapeHtml(firebaseSyncState.scope || (isAdminUser() ? "전체" : getAllowedRegionNames().join(", ")))}</div>
+        <div><strong>상태 변경 문서 수:</strong> ${Number(firebaseSyncState.docCount || 0).toLocaleString()}개</div>
+      </div>
+      <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap;">
+        <button type="button" data-reset-worktype="${escapeHtml(activeWorkType)}" style="border:none;border-radius:12px;background:${({ reinforcement: "#dc2626", low_voltage: "#2563eb", high_voltage: "#7c3aed", relay_table: "#059669" })[activeWorkType] || "#dc2626"};color:#fff;font-weight:900;font-size:13px;padding:10px 12px;cursor:pointer;">${escapeHtml(getWorkTypeLabel())} 초기화</button>
+      </div>
+      <div style="margin-top:10px;font-size:12px;color:#6b7280;line-height:1.6;">
+        현재 선택한 ${escapeHtml(getWorkTypeLabel())} 파트의 변경값을 초기화합니다. 다른 파트를 초기화하려면 지도에서 해당 파트를 먼저 선택하세요.
+      </div>
+      <div style="margin-top:8px;font-size:12px;color:#6b7280;line-height:1.6;">
+        ${activeWorkType === "reinforcement" ? "보강공사 작업자는 담당 권역 지사만 동기화합니다." : "저압/고압/중계표는 권역 구분 없이 해당 작업 종류의 상태값만 동기화합니다."}
+      </div>
+    </div>
+  `;
+}
+
+function renderWorkerLocationTab() {
+  if (activeWorkType !== "reinforcement") {
+    const workers = getWorkersForActiveWorkType();
+    const workerRows = workers.map(name => {
+      const update = getWorkerLastUpdate(name);
+      const hasLocation = !!(update && update.groupNo);
+      const timeText = update && update.updatedAtMs ? formatDateTime(new Date(update.updatedAtMs)) : "기록 없음";
+      const branchText = update && update.branch ? escapeHtml(update.branch) : "-";
+      const addressText = update && update.address ? escapeHtml(update.address) : "-";
+      return `
+        <button type="button" data-worker-id="${escapeHtml(name)}"
+          style="width:100%;text-align:left;border:1px solid ${hasLocation ? "#d1d5db" : "#e5e7eb"};background:${hasLocation ? "#fff" : "#f9fafb"};border-radius:12px;padding:10px 11px;margin-bottom:7px;cursor:${hasLocation ? "pointer" : "default"};">
+          <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;">
+            <strong style="font-size:13px;color:#111827;">${escapeHtml(name)}</strong>
+            <span style="font-size:11px;color:${hasLocation ? "#16a34a" : "#9ca3af"};">${hasLocation ? "이동 가능" : "기록 없음"}</span>
+          </div>
+          <div style="font-size:11px;color:#6b7280;margin-top:5px;line-height:1.55;">
+            <div><strong>지사:</strong> ${branchText}</div>
+            <div><strong>계기 주소:</strong> ${addressText}</div>
+            <div><strong>수정시간:</strong> ${escapeHtml(timeText)}</div>
+          </div>
+        </button>
+      `;
+    }).join("");
+
+    return `
+      <div style="font-size:12px;color:#6b7280;margin-bottom:10px;line-height:1.6;">
+        ${escapeHtml(getWorkTypeLabel())} 작업자 이름을 누르면 해당 작업자가 마지막으로 수정한 마커 위치로 이동합니다.
+      </div>
+      <div style="font-size:14px;font-weight:900;color:#111827;margin:0 0 8px;">${escapeHtml(getWorkTypeLabel())} 작업자</div>
+      ${workerRows || `<div style="font-size:12px;color:#9ca3af;padding:8px;">작업자 없음</div>`}
+    `;
+  }
+
+  const workersByRegion = getWorkersByRegion();
+  const selectedRegion = adminWorkerLocationRegion || "1권역";
+  const workers = workersByRegion[selectedRegion] || [];
+
+  const workerRows = workers.map(name => {
+    const update = getWorkerLastUpdate(name);
+    const hasLocation = !!(update && update.groupNo);
+    const timeText = update && update.updatedAtMs ? formatDateTime(new Date(update.updatedAtMs)) : "기록 없음";
+    const branchText = update && update.branch ? escapeHtml(update.branch) : "-";
+    const addressText = update && update.address ? escapeHtml(update.address) : "-";
+    return `
+      <button type="button" data-worker-id="${escapeHtml(name)}"
+        style="width:100%;text-align:left;border:1px solid ${hasLocation ? "#d1d5db" : "#e5e7eb"};background:${hasLocation ? "#fff" : "#f9fafb"};border-radius:12px;padding:10px 11px;margin-bottom:7px;cursor:${hasLocation ? "pointer" : "default"};">
+        <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;">
+          <strong style="font-size:13px;color:#111827;">${escapeHtml(name)}</strong>
+          <span style="font-size:11px;color:${hasLocation ? "#16a34a" : "#9ca3af"};">${hasLocation ? "이동 가능" : "기록 없음"}</span>
+        </div>
+        <div style="font-size:11px;color:#6b7280;margin-top:5px;line-height:1.55;">
+          <div><strong>지사:</strong> ${branchText}</div>
+          <div><strong>계기 주소:</strong> ${addressText}</div>
+          <div><strong>수정시간:</strong> ${escapeHtml(timeText)}</div>
+        </div>
+      </button>
+    `;
+  }).join("");
+
+  return `
+    <div style="font-size:12px;color:#6b7280;margin-bottom:10px;line-height:1.6;">
+      작업자 이름을 누르면 해당 작업자가 마지막으로 수정한 마커 위치로 이동합니다.<br>
+      지도 화면 오른쪽 하단의 1~5권역 버튼을 누르면 권역별 작업자 위치 말풍선을 표시/해제할 수 있습니다.
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;">
+      ${Object.keys(REGION_BRANCHES).map(region => `
+        <button type="button" data-admin-worker-region="${escapeHtml(region)}"
+          style="flex:1;min-width:58px;height:34px;border:none;border-radius:999px;font-size:12px;font-weight:900;cursor:pointer;background:${selectedRegion === region ? "#111827" : "#f3f4f6"};color:${selectedRegion === region ? "#fff" : "#111827"};">
+          ${escapeHtml(region)}
+        </button>
+      `).join("")}
+    </div>
+    <div style="font-size:14px;font-weight:900;color:#111827;margin:0 0 8px;">${escapeHtml(selectedRegion)} 작업자</div>
+    ${workerRows || `<div style="font-size:12px;color:#9ca3af;padding:8px;">작업자 없음</div>`}
+  `;
+}
+
+async function copyText(text, label) {
+  const value = String(text || "").trim();
+  if (!value || value === "-") {
+    alert(`${label} 값이 없습니다.`);
+    return;
+  }
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(value);
+    } else {
+      const ta = document.createElement("textarea");
+      ta.value = value;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
+    alert(`${label} 복사됨`);
+  } catch (e) {
+    alert(`${label} 복사 실패`);
+  }
+}
+window.copyFieldValue = function(value, label) {
+  copyText(value, label);
+};
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+function debounce(fn, wait) {
+  let t = null;
+  return function () {
+    clearTimeout(t);
+    t = setTimeout(() => fn(), wait);
+  };
+}
+
+function normalizeStatus(value) {
+  const v = String(value || "").trim();
+  const options = getWorkStatusOptions();
+  if (options) {
+    const compact = v.replace(/\s+/g, "").toUpperCase();
+    // 저압의 기존 JSON/Firebase PPA 기록도 새 명칭으로 표시합니다.
+    if (activeWorkType === "low_voltage" && compact === "PPA") return "사전협의";
+    const known = options.find(item => item.value === compact);
+    if (known) return known.value;
+  }
+  return v;
+}
+function getRowStatus(groupNo, idx, row) {
+  const key = getStableRowKey(groupNo, idx, row);
+  return normalizeStatus(statusOverrides[key] || row.k || "");
+}
+
+function getRowStatusChange(groupNo, idx, row) {
+  if (!statusChangeDetailsReady) return undefined;
+  const key = getStableRowKey(groupNo, idx, row);
+  const detail = statusChangeDetails[key];
+  // 로컬 상태만 먼저 바뀐 경우 이전 변경자를 새 상태의 변경자로 표시하지 않습니다.
+  if (!detail) return Object.prototype.hasOwnProperty.call(statusOverrides, key) ? undefined : null;
+  if (detail.status !== normalizeStatus(statusOverrides[key])) return undefined;
+  return detail;
+}
+
+function formatStatusChangeTime(milliseconds) {
+  if (!Number.isFinite(milliseconds) || milliseconds <= 0) return "기록 없음";
+  const date = new Date(milliseconds);
+  if (!Number.isFinite(date.getTime())) return "기록 없음";
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Seoul", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23"
+  }).formatToParts(date);
+  const p = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}`;
+}
+
+function getBucketStatusChange(group, bucket) {
+  const details = bucket.indices.map(index => getRowStatusChange(group.n, index, group.rows[index]));
+  if (details.some(detail => detail === undefined)) return undefined;
+  const recorded = details.filter(Boolean);
+  const pending = recorded.find(detail => detail.pending);
+  if (pending) return pending;
+  return recorded.reduce((latest, detail) =>
+    !latest || detail.updatedAtMs > latest.updatedAtMs ? detail : latest, null);
+}
+
+function renderStatusChangeDetails(detail) {
+  if (!isAdminUser()) return "";
+  const style = "border-radius:7px;background:#f1f5f9;color:#475569;line-height:1.6;text-align:left;";
+  if (!detail) {
+    const message = detail === undefined ? "상태변경 정보 확인 중" : "상태변경 기록 없음";
+    return `<div class="status-change-detail" style="${style}">${message}</div>`;
+  }
+  const worker = getDisplayUserId(detail.updatedByEmail) || "기록 없음";
+  const time = detail.pending ? "저장 확인 중" : formatStatusChangeTime(detail.updatedAtMs).slice(0, 16);
+  return `<div class="status-change-detail" style="${style}">
+    <div>작업자 : ${escapeHtml(worker)}</div>
+    <div style="white-space:nowrap;">작업일시 : ${escapeHtml(time)}</div>
+  </div>`;
+}
+
+
+function normalizeComparableStatus(value) {
+  return String(value || "").replace(/\s+/g, "").trim();
+}
+
+function getOriginalRowStatus(row) {
+  const status = activeWorkType === "low_voltage" ? normalizeStatus(row.k) : row.k;
+  return normalizeComparableStatus(status);
+}
+
+function getGroupColor(group) {
+  const allStatuses = getVisibleRowEntries(group)
+    .map(({ row, index }) => normalizeComparableStatus(getRowStatus(group.n, index, row)))
+    .filter(Boolean);
+
+  if (!allStatuses.length) return null;
+
+  // 미처리 계기가 있으면 그 작업 구분을 표시하고, 모두 처리되면 결과 색상을 표시합니다.
+  const statuses = allStatuses.filter(status => !COMPLETION_STATUSES.includes(status));
+  if (!statuses.length) {
+    if (allStatuses.includes("작업불가")) return "brown";
+    if (allStatuses.includes("재방문")) return "teal";
+    return "green";
+  }
+
+  if (usesLowVoltageStatuses()) {
+    // 저압/중계표 공통 상태
+    if (statuses.includes("긴급") || statuses.includes("초긴급")) return "black";
+    if (statuses.includes("험로")) return "purple";
+    if (statuses.includes("점검")) return "orange";
+    if (statuses.includes("MKAMI")) return "red";
+    if (statuses.includes(activeWorkType === "low_voltage" ? "사전협의" : "PPA")) return "blue";
+    if (statuses.includes("기타")) return activeWorkType === "low_voltage" ? "yellow" : "gray";
+    return null;
+  }
+
+  if (activeWorkType === "high_voltage") {
+    // 같은 좌표의 미처리 계기는 초긴급 → 긴급 → 험로 → 점검 순으로 표시합니다.
+    if (statuses.includes("초긴급")) return "red";
+    if (statuses.includes("긴급")) return "black";
+    if (statuses.includes("험로")) return "purple";
+    if (statuses.includes("점검")) return "orange";
+    return null;
+  }
+
+  // 보강공사: 기존 우선순위 로직 사용
+  const hasEmergency = statuses.includes("긴급");
+  const hasPriority1 = statuses.includes("계기교체(1순위)");
+  const hasPriority2 = statuses.includes("계기교체(2순위)");
+  const allPriority3 = statuses.every(v => v === "계기교체(3순위)");
+
+  if (hasEmergency) return "black";
+  if (hasPriority1) return "red";
+  if (hasPriority2) return "orange";
+  if (allPriority3) return "yellow";
+  return null;
+}
+
+function groupHasThreePhase(group) {
+  if (activeWorkType === "reinforcement") {
+    const rows = group?.rows || [];
+    if (!rows.length) return false;
+    // 주소 묶음과 무관하게 좌표 마커 전체를 판정합니다.
+    // 분할 JSON의 미수신 행도 검사하므로 일부만 로드된 마커는 3상으로 단정하지 않습니다.
+    for (const row of rows) {
+      if (!row || !(row.p3 === true || String(row.p3 || "") === "1")) return false;
+    }
+    return true;
+  }
+  return getVisibleRowEntries(group).some(({ row }) => String(row.j || "").includes("3상"));
+}
+
+function getMarkerSize(selected, label, shape) {
+  if (shape === "legacy") return selected ? 28 : 16;
+  // 보강공사는 계기 수와 모양에 관계없이 같은 크기입니다.
+  if (activeWorkType === "reinforcement") return selected ? 26 : 22;
+  return selected ? 28 : 16;
+}
+
+function getMarkerFill(color) {
+  const fillMap = {
+    red: "#ef4444",
+    orange: activeWorkType === "reinforcement" ? "#8b5cf6" : "#f97316",
+    yellow: activeWorkType === "low_voltage" ? "#eab308" : "#facc15",
+    green: "#22c55e",
+    brown: "#92400e",
+    black: "#111111",
+    gray: "#6b7280",
+    pink: "#db2777",
+    blue: "#2563eb",
+    purple: "#7c3aed",
+    teal: "#0891b2"
+  };
+  return fillMap[color] || fillMap.gray;
+}
+
+function renderStatusDot(color) {
+  // 모든 상태 아이콘에 같은 크기와 음영을 적용해 OS 이모지와 단색 원의 차이를 없앱니다.
+  return `<span aria-hidden="true" class="kdn-status-dot" style="display:inline-block;width:12px;height:12px;border-radius:50%;background-color:${getMarkerFill(color)};background-image:radial-gradient(circle at 28% 22%,rgba(255,255,255,.62) 0%,rgba(255,255,255,.18) 33%,rgba(255,255,255,0) 62%),linear-gradient(150deg,rgba(0,0,0,0) 45%,rgba(0,0,0,.18) 100%);vertical-align:-1px;margin-right:5px;"></span>`;
+}
+
+function getStatusTextColor(status) {
+  const value = normalizeComparableStatus(status);
+  if (value === "재방문") return getMarkerFill("teal");
+  if (activeWorkType === "low_voltage" && value === "기타") return getMarkerFill("yellow");
+  return "#374151";
+}
+
+function svgMarker(color, selected = false, label = "", shape = "legacy") {
+  const fill = getMarkerFill(color);
+
+  if (shape !== "legacy") {
+    const size = getMarkerSize(selected, label, shape);
+    const center = size / 2;
+    const padding = selected ? 4 : 2;
+    const geometry = shape === "triangle"
+      ? `polygon points="${center},${padding} ${size - padding},${size - padding} ${padding},${size - padding}"`
+      : `circle cx="${center}" cy="${center}" r="${center - padding}"`;
+    const textY = shape === "triangle" ? size * 0.72 : center + 0.5;
+    const digits = Math.max(1, String(label).length);
+    // 숫자가 늘어도 마커는 고정하고, 도형 내부 폭에 맞춰 글자만 축소합니다.
+    const fittingSize = shape === "triangle"
+      ? (textY - padding - 0.5) / (digits * 0.62 + 0.5)
+      : (size - padding * 2 - 3) / (digits * 0.62);
+    const fontSize = Math.min(selected ? 11 : 10, fittingSize);
+    const textFill = color === "yellow" ? "#1f2937" : "white";
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
+      ${selected ? `<${geometry} fill="none" stroke="#0f172a" stroke-width="7" stroke-linejoin="round"/>` : ""}
+      <${geometry} fill="${fill}" stroke="white" stroke-width="${selected ? 3 : 1.6}" stroke-linejoin="round"/>
+      ${label ? `<text x="${center}" y="${textY}" text-anchor="middle" dominant-baseline="middle" fill="${textFill}" font-size="${fontSize}" font-weight="900" font-family="Arial,sans-serif">${escapeHtml(label)}</text>` : ""}
+    </svg>`;
+    return "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(svg);
+  }
+
+  if (selected) {
+    const svg = `
+      <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 28 28">
+        <polygon points="14,2 17.4,10.2 26.3,10.9 19.5,16.7 21.6,25.4 14,20.8 6.4,25.4 8.5,16.7 1.7,10.9 10.6,10.2" fill="${fill}" stroke="white" stroke-width="2.4" stroke-linejoin="round"/>
+        ${label ? `<text x="14" y="15" text-anchor="middle" dominant-baseline="middle" fill="white" font-size="10" font-weight="900" font-family="Arial,sans-serif">${label}</text>` : ""}
+      </svg>
+    `;
+    return "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(svg);
+  }
+
+  const svg = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+      <circle cx="8" cy="8" r="5.5" fill="${fill}" stroke="white" stroke-width="2"/>
+      ${label ? `<text x="8" y="8.4" text-anchor="middle" dominant-baseline="middle" fill="white" font-size="7" font-weight="900" font-family="Arial,sans-serif">${label}</text>` : ""}
+    </svg>
+  `;
+  return "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(svg);
+}
+const markerImageCache = new Map();
+function getMarkerImage(color, selected = false, label = "", shape = "legacy") {
+  const key = JSON.stringify([activeWorkType, color, selected, label, shape]);
+  if (!markerImageCache.has(key)) {
+    const size = getMarkerSize(selected, label, shape);
+    const offset = size / 2;
+    // 계기 수별 이미지를 공유하며, 숫자 종류 증가로 인한 잦은 재생성을 줄입니다.
+    if (markerImageCache.size >= 2048) markerImageCache.delete(markerImageCache.keys().next().value);
+    markerImageCache.set(key, new kakao.maps.MarkerImage(svgMarker(color, selected, label, shape),
+      new kakao.maps.Size(size, size), { offset: new kakao.maps.Point(offset, offset) }));
+  }
+  return markerImageCache.get(key);
+}
+function hasCompletedNonMkamiRow(group) {
+  if (activeWorkType !== "low_voltage") return false;
+  // 본인에게 보이는 계기만 판정합니다. MKAMI와 섞여도 다른 종류의 처리 결과를 우선합니다.
+  return getVisibleRowEntries(group).some(({ row, index }) => {
+    const original = normalizeStatus(row.k);
+    const current = normalizeComparableStatus(getRowStatus(group.n, index, row));
+    return original && original !== "MKAMI" && !COMPLETION_STATUSES.includes(original) &&
+      COMPLETION_STATUSES.includes(current);
+  });
+}
+
+function getGroupMarkerImage(group, color, selected = group.n === selectedMarkerGroupNo) {
+  const threePhase = groupHasThreePhase(group);
+  if (activeWorkType === "reinforcement") {
+    // 분할 데이터는 rows.length에 전체 계기 수를 보존합니다.
+    return getMarkerImage(color, selected, String(group.rows?.length || 0), threePhase ? "triangle" : "circle");
+  }
+  const label = threePhase ? "3" : "";
+  if (activeWorkType === "low_voltage") {
+    return getMarkerImage(color, selected, label, hasCompletedNonMkamiRow(group) ? "triangle" : "circle");
+  }
+  // 재방문은 선택 중에도 원형을 유지합니다. 보강공사 3상 판정은 위에서 먼저 적용합니다.
+  return getMarkerImage(color, selected, label, color === "teal" ? "circle" : "legacy");
+}
+function updateMarkerAppearance(marker, group, color = getGroupColor(group)) {
+  if (!color) return;
+  const selected = group.n === selectedMarkerGroupNo;
+  const image = getGroupMarkerImage(group, color, selected);
+  if (marker.getImage() !== image) marker.setImage(image);
+  const zIndex = selected ? 10000 : 0;
+  if (marker.getZIndex() !== zIndex) marker.setZIndex(zIndex);
+}
+function refreshMarkerSelection() {
+  markerMap.forEach((marker, groupNo) => {
+    const group = groupMap.get(groupNo);
+    if (group) updateMarkerAppearance(marker, group);
+  });
+}
+
+function getSelectedValues(name) {
+  return Array.from(document.querySelectorAll(`input[name="${name}"]:checked`)).map(el => el.value);
+}
+
+function getSelectedRegionBranches() {
+  if (activeWorkType !== "reinforcement") return null;
+  const selectedRegions = getSelectedValues("regionFilterCheck");
+  const allowedRegionNames = getAllowedRegionNames();
+  const allRegion = !selectedRegions.length || selectedRegions.includes("all");
+
+  const targetRegions = allRegion
+    ? (isAdminUser() ? [] : allowedRegionNames)
+    : selectedRegions.filter(region => isAdminUser() || allowedRegionNames.includes(region));
+
+  if (!targetRegions.length) return isAdminUser() ? null : new Set();
+
+  const branches = new Set();
+  targetRegions.forEach(region => {
+    (REGION_BRANCHES[region] || []).forEach(branch => branches.add(branch));
+  });
+  return branches;
+}
+
+function hasActiveRegionFilter() {
+  if (activeWorkType !== "reinforcement") return false;
+  if (!isAdminUser()) return true;
+  const selectedRegions = getSelectedValues("regionFilterCheck");
+  return selectedRegions.length && !selectedRegions.includes("all");
+}
+
+function hasActiveBranchFilter() {
+  const selectedBranches = getSelectedValues("branchFilterCheck");
+  return selectedBranches.length && !selectedBranches.includes("all");
+}
+
+function filterByRegionAndBranch(source) {
+  let result = source || [];
+  const allowedBranches = getAllowedBranchSet();
+  const regionBranches = getSelectedRegionBranches();
+  const selectedBranches = getSelectedValues("branchFilterCheck");
+
+  if (allowedBranches) {
+    result = result.filter(g => getGroupBranches(g).some(branch => allowedBranches.has(branch)));
+  }
+
+  if (regionBranches) {
+    result = result.filter(g => getGroupBranches(g).some(branch => regionBranches.has(branch)));
+  }
+
+  if (selectedBranches.length && !selectedBranches.includes("all")) {
+    result = result.filter(g => getGroupBranches(g).some(branch => selectedBranches.includes(branch)));
+  }
+
+  return result;
+}
+
+function getActiveMapBranches() {
+  const allowedBranches = getAllowedBranchSet();
+  const selectedBranches = getSelectedValues("branchFilterCheck");
+
+  if (selectedBranches.length && !selectedBranches.includes("all")) {
+    return selectedBranches.filter(branch => !allowedBranches || allowedBranches.has(branch));
+  }
+
+  const regionBranches = getSelectedRegionBranches();
+  if (regionBranches) return Array.from(regionBranches);
+
+  if (allowedBranches) return Array.from(allowedBranches);
+
+  return [];
+}
+function setDropdownLabel(dropdown, values, allLabel) {
+  const label = dropdown.querySelector(".kdn-multi-label");
+  if (!label) return;
+
+  const options = getWorkStatusOptions();
+  const statusLabelMap = !options ? {
+    black: "긴급",
+    red: "계기교체(1순위)",
+    orange: "계기교체(2순위)",
+    yellow: "계기교체(3순위)",
+    green: "모뎀설치",
+    brown: "작업불가",
+    teal: "재방문"
+  } : Object.fromEntries(options.map(item => [item.color, item.value]));
+
+  const filtered = values.filter(v => v !== "all");
+
+  if (!filtered.length || values.includes("all")) {
+    label.textContent = allLabel;
+    return;
+  }
+
+  const mapped = filtered.map(v => statusLabelMap[v] || v);
+
+  if (mapped.length === 1) {
+    label.textContent = mapped[0];
+  } else {
+    label.textContent = mapped.join(", ");
+  }
+}
+function closeAllMenus() {
+  document.querySelectorAll(".kdn-multi-menu").forEach(el => el.style.display = "none");
+}
+function toggleDropdown(dropdown) {
+  const menu = dropdown.querySelector(".kdn-multi-menu");
+  const isOpen = menu.style.display === "block";
+  closeAllMenus();
+  menu.style.display = isOpen ? "none" : "block";
+}
+function buildMultiSelect(dropdown, name, items, allLabel, onChange) {
+  const prev = getSelectedValues(name);
+  dropdown.innerHTML = "";
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "kdn-multi-button";
+  button.innerHTML = `<span class="kdn-multi-label">${allLabel}</span><span style="font-size:10px;">▼</span>`;
+  button.onclick = (e) => {
+    e.stopPropagation();
+    toggleDropdown(dropdown);
+  };
+
+  const menu = document.createElement("div");
+  menu.className = "kdn-multi-menu";
+  menu.style.display = "none";
+
+  items.forEach(item => {
+    const row = document.createElement("label");
+    row.className = "kdn-multi-item";
+
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.name = name;
+    input.value = item.value;
+    input.checked = prev.length ? prev.includes(item.value) : !!item.checked;
+
+    const text = document.createElement("span");
+    if (item.swatchColor) text.innerHTML = renderStatusDot(item.swatchColor) + escapeHtml(item.label);
+    else text.textContent = item.label;
+
+    input.onchange = () => {
+      if (item.value === "all" && input.checked) {
+        dropdown.querySelectorAll(`input[name="${name}"]`).forEach(el => {
+          if (el.value !== "all") el.checked = false;
+        });
+      } else if (item.value !== "all" && input.checked) {
+        const allInput = dropdown.querySelector(`input[name="${name}"][value="all"]`);
+        if (allInput) allInput.checked = false;
+      }
+
+      const current = getSelectedValues(name);
+      if (!current.length) {
+        const allInput = dropdown.querySelector(`input[name="${name}"][value="all"]`);
+        if (allInput) {
+          allInput.checked = true;
+        } else {
+          input.checked = true;
+        }
+      }
+
+      const values = getSelectedValues(name);
+      setDropdownLabel(dropdown, values, allLabel);
+      onChange();
+    };
+
+    row.appendChild(input);
+    row.appendChild(text);
+    menu.appendChild(row);
+  });
+
+  dropdown.appendChild(button);
+  dropdown.appendChild(menu);
+  setDropdownLabel(dropdown, getSelectedValues(name), allLabel);
+}
+
+function buildStatusFilter() {
+  const options = getWorkStatusOptions();
+  const items = !options
+    ? [
+        { value: "all", label: "구분 전체", checked: true },
+        { value: "black", label: "긴급", swatchColor: "black", checked: false },
+        { value: "red", label: "계기교체(1순위)", swatchColor: "red", checked: false },
+        { value: "orange", label: "계기교체(2순위)", swatchColor: "orange", checked: false },
+        { value: "yellow", label: "계기교체(3순위)", swatchColor: "yellow", checked: false },
+        { value: "green", label: "모뎀설치", swatchColor: "green", checked: false },
+        { value: "brown", label: "작업불가", swatchColor: "brown", checked: false },
+        { value: "teal", label: "재방문", swatchColor: "teal", checked: false }
+      ]
+    : [{ value: "all", label: "구분 전체", checked: true }].concat(
+        options.map(item => ({
+          value: item.color, label: item.value, swatchColor: item.color, checked: false
+        }))
+      );
+  buildMultiSelect(statusDropdown, "statusFilterCheck", items, "구분", refresh);
+}
+function buildRegionFilter() {
+  if (activeWorkType !== "reinforcement") {
+    regionDropdown.innerHTML = "";
+    return;
+  }
+  const current = getSelectedValues("regionFilterCheck");
+  const allowedRegions = getAllowedRegionNames();
+  const regionNames = isAdminUser() ? Object.keys(REGION_BRANCHES) : allowedRegions;
+
+  const items = (isAdminUser()
+    ? [{ value: "all", label: "권역 전체", checked: !current.length || current.includes("all") }]
+    : [])
+    .concat(regionNames.map(region => ({
+      value: region,
+      label: `${region} (${REGION_BRANCHES[region].join(", ")})`,
+      checked: current.length ? current.includes(region) : !isAdminUser()
+    })));
+  buildMultiSelect(regionDropdown, "regionFilterCheck", items, "권역", onAreaFilterChange);
+}
+function buildBranchFilter() {
+  const current = getSelectedValues("branchFilterCheck");
+  const allowedBranches = getAllowedBranchSet();
+  const branches = allowedBranches
+    ? branchMeta.filter(b => allowedBranches.has(b.name))
+    : branchMeta;
+
+  const canUseAllBranch = isAdminUser() || activeWorkType !== "reinforcement";
+  const items = (canUseAllBranch
+    ? [{ value: "all", label: "지사 전체", checked: !current.length || current.includes("all") }]
+    : [])
+    .concat(branches.map(b => ({
+      value: b.name,
+      label: b.name,
+      checked: current.includes(b.name)
+    })));
+  buildMultiSelect(branchDropdown, "branchFilterCheck", items, "지사", onBranchChange);
+}
+
+function updateMarkerCount(items = [], meterBaseGroups = []) {
+  if (!markerCountEl) return;
+
+  const selectedBranches = getSelectedValues("branchFilterCheck");
+  const selectedStatuses = getSelectedValues("statusFilterCheck");
+  const filteredBranch = hasActiveBranchFilter() || hasActiveRegionFilter();
+  const filteredStatus = selectedStatuses.length && !selectedStatuses.includes("all");
+
+  const activeStatuses = filteredStatus
+    ? selectedStatuses.filter(v => v !== "all")
+    : [];
+
+  let meterCount = 0;
+  const countSource = filteredStatus ? meterBaseGroups : items;
+
+  (countSource || []).forEach(g => {
+    getVisibleRowEntries(g).forEach(({ row: r, index: idx }) => {
+      const meter = String(r.m || "").trim();
+      if (!meter) return;
+
+      const rowStatus = normalizeComparableStatus(getRowStatus(g.n, idx, r));
+      if (!rowStatus) return;
+
+      if (!filteredStatus) {
+        meterCount += 1;
+        return;
+      }
+
+      if (getWorkStatusOptions()) {
+        const statusColor = getWorkStatusColor(rowStatus);
+        if (statusColor && activeStatuses.includes(statusColor)) meterCount += 1;
+        return;
+      }
+
+      if (activeStatuses.includes("black") && rowStatus === "긴급") {
+        meterCount += 1;
+        return;
+      }
+
+      if (activeStatuses.includes("red") && rowStatus === "계기교체(1순위)") {
+        meterCount += 1;
+        return;
+      }
+
+      if (activeStatuses.includes("orange") && rowStatus === "계기교체(2순위)") {
+        meterCount += 1;
+        return;
+      }
+
+      if (activeStatuses.includes("yellow") && rowStatus === "계기교체(3순위)") {
+        meterCount += 1;
+        return;
+      }
+
+      if (activeStatuses.includes("green") && rowStatus === "모뎀설치") {
+        meterCount += 1;
+        return;
+      }
+
+      if (activeStatuses.includes("brown") && rowStatus === "작업불가") {
+        meterCount += 1;
+        return;
+      }
+
+      if (activeStatuses.includes("teal") && rowStatus === "재방문") {
+        meterCount += 1;
+        return;
+      }
+    });
+  });
+
+  markerCountEl.textContent = (activeWorkType !== "reinforcement" || filteredBranch || filteredStatus)
+    ? `대상 ${items.length.toLocaleString()}개 / 계기수 ${meterCount.toLocaleString()}개`
+    : "";
+}
+
+
+function updateStatusSummary(items) {
+  if (!statusSummaryEl) return;
+  const selectedBranches = getSelectedValues("branchFilterCheck");
+  const selectedStatuses = getSelectedValues("statusFilterCheck");
+  const filteredBranch = hasActiveBranchFilter() || hasActiveRegionFilter();
+  const filteredStatus = selectedStatuses.length && !selectedStatuses.includes("all");
+  if (activeWorkType === "reinforcement" && !(filteredBranch || filteredStatus)) {
+    statusSummaryEl.textContent = "";
+    return;
+  }
+  const counts = { blue: 0, black: 0, red: 0, orange: 0, yellow: 0, purple: 0, green: 0, gray: 0, pink: 0, brown: 0, teal: 0 };
+  (items || []).forEach(g => {
+    const c = getGroupColor(g);
+    if (c && counts[c] !== undefined) counts[c] += 1;
+  });
+  const parts = [];
+  if (counts.blue) parts.push(`🔵 ${counts.blue}`);
+  if (counts.black) parts.push(`⚫ ${counts.black}`);
+  if (counts.red) parts.push(`🔴 ${counts.red}`);
+  if (counts.orange) parts.push(activeWorkType === "reinforcement" ? `🟣 ${counts.orange}` : `🟠 ${counts.orange}`);
+  if (counts.yellow) parts.push(activeWorkType === "low_voltage" ? `${renderStatusDot("yellow")}${counts.yellow}` : `🟡 ${counts.yellow}`);
+  if (counts.purple) parts.push(`🟣 ${counts.purple}`);
+  if (counts.green) parts.push(`🟢 ${counts.green}`);
+  if (counts.gray) parts.push(`⚪ ${counts.gray}`);
+  if (counts.pink) parts.push(`${renderStatusDot("pink")}${counts.pink}`);
+  if (counts.brown) parts.push(`🟤 ${counts.brown}`);
+  if (counts.teal) parts.push(`${renderStatusDot("teal")}${counts.teal}`);
+  statusSummaryEl.innerHTML = parts.join("  ");
+}
+
+
+function moveToCurrentLocation() {
+  if (currentLocationMarker) {
+    currentLocationMarker.setMap(null);
+    currentLocationMarker = null;
+    return;
+  }
+
+  if (!navigator.geolocation) {
+    alert("위치 정보를 지원하지 않는 기기예요.");
+    return;
+  }
+
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      const lat = pos.coords.latitude;
+      const lng = pos.coords.longitude;
+      const latlng = new kakao.maps.LatLng(lat, lng);
+
+      map.setCenter(latlng);
+      if (map.getLevel() > 4) {
+        map.setLevel(4);
+      }
+
+      const svg =
+        '<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36">'
+        + '<polygon points="18,2 22,12 34,13 25,20 28,32 18,26 8,32 11,20 2,13 14,12" fill="#8b5cf6" stroke="#ffffff" stroke-width="2"/>'
+        + '</svg>';
+
+      const imageSrc = "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(svg);
+      const imageSize = new kakao.maps.Size(36, 36);
+      const imageOption = { offset: new kakao.maps.Point(18, 18) };
+      const markerImage = new kakao.maps.MarkerImage(imageSrc, imageSize, imageOption);
+
+      currentLocationMarker = new kakao.maps.Marker({
+        position: latlng,
+        image: markerImage,
+        zIndex: 9999
+      });
+
+      currentLocationMarker.setMap(map);
+    },
+    () => {
+      alert("현재 위치를 가져오지 못했어요.");
+    },
+    { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
+  );
+}
+
+
+function ensureBottomDock_DISABLED() {
+  const oldDock = document.getElementById("kdnBottomDock");
+  if (oldDock) oldDock.remove();
+
+  const dock = document.createElement("div");
+  dock.id = "kdnBottomDock";
+  dock.className = "kdn-dock";
+  dock.innerHTML = `
+    <button type="button" class="kdn-dock-btn" id="kdnDockSearch">검색</button>
+    <button type="button" class="kdn-dock-btn" id="kdnDockStatus">구분</button>
+    <button type="button" class="kdn-dock-btn" id="kdnDockBranch">지사</button>
+    <button type="button" class="kdn-dock-btn" id="kdnDockLocation">현재위치</button>
+  `;
+  document.body.appendChild(dock);
+
+  dock.querySelector("#kdnDockSearch").onclick = () => {
+    if (searchInput) searchInput.focus();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+  dock.querySelector("#kdnDockStatus").onclick = () => {
+    if (statusDropdown) toggleDropdown(statusDropdown);
+  };
+  dock.querySelector("#kdnDockBranch").onclick = () => {
+    if (branchDropdown) toggleDropdown(branchDropdown);
+  };
+  dock.querySelector("#kdnDockLocation").onclick = () => {
+    moveToCurrentLocation();
+  };
+}
+
+
+
+function updateWorkTypeUIVisibility() {
+  if (!regionDropdown) return;
+  regionDropdown.style.display = activeWorkType === "reinforcement" ? "" : "none";
+  if (isAdminUser()) renderAdminWorkerLocationButtons();
+}
+
+function renderWorkTypeSwitcher() {
+  const old = document.getElementById("kdnWorkTypeSwitcher");
+  if (old) old.remove();
+  if (!FULL_SCOPE_ADMINS.includes(getCurrentUserId())) return null;
+
+  const row = document.createElement("div");
+  row.id = "kdnWorkTypeSwitcher";
+  row.className = "kdn-row";
+  row.style.gap = "5px";
+
+  Object.entries(WORK_TYPES).forEach(([type, info]) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = info.label;
+    btn.style.flex = "1";
+    btn.style.height = "34px";
+    btn.style.border = "none";
+    btn.style.borderRadius = "9px";
+    btn.style.fontSize = "12px";
+    btn.style.fontWeight = "900";
+    btn.style.cursor = "pointer";
+    btn.style.background = activeWorkType === type ? "#111827" : "#f3f4f6";
+    btn.style.color = activeWorkType === type ? "#fff" : "#111827";
+    btn.onclick = () => switchWorkType(type);
+    row.appendChild(btn);
+  });
+  return row;
+}
+
+async function reloadActiveWorkTypeData() {
+  stopOverrideSync();
+  closeInfo();
+  closeAdminDashboard();
+  clearAdminWorkerLocationLabels();
+  removeAdminWorkerLocationButtons();
+
+  tileMeta = [];
+  branchMeta = [];
+  loadedTiles = new Map();
+  loadingTiles = new Map();
+  groups = [];
+  groupMap = new Map();
+  rowGroupMap = new Map();
+  clearMarkers();
+  appliedSearchQuery = "";
+  selectedMarkerGroupNo = null;
+  currentGroupNo = null;
+  currentInfoOpenIndex = null;
+
+  try {
+    const [tileData, branchData] = await Promise.all([
+      fetchJsonFresh(resolveDataFile("tiles_index.json")),
+      fetchJsonFresh(resolveDataFile("branches.json")).catch(() => [])
+    ]);
+    tileMeta = tileData.tiles || [];
+    branchMeta = Array.isArray(branchData) ? branchData : [];
+
+    ensureUI();
+    startOverrideSync();
+    renderLoginStatus();
+    renderAdminDashboardButton();
+    renderAdminWorkerLocationButtons();
+
+    // 저압/고압은 대상 수가 적으므로 초기 화면에서도 전체 타일을 미리 읽습니다.
+    if (activeWorkType !== "reinforcement") await loadAllTiles();
+    await refresh();
+  } catch (e) {
+    console.error(e);
+    alert(`${getWorkTypeLabel()} JSON 데이터를 불러오지 못했습니다. ${resolveDataFile("tiles_index.json")} 파일을 확인하세요.`);
+  }
+}
+
+async function switchWorkType(type) {
+  if (!WORK_TYPES[type] || type === activeWorkType) return;
+  if (!canAccessWorkType(type)) return;
+  stopOverrideSync();
+
+  closeInfo();
+  closeAdminDashboard();
+  clearAdminWorkerLocationLabels();
+  removeAdminWorkerLocationButtons();
+
+  activeWorkType = type;
+  tileMeta = [];
+  branchMeta = [];
+  loadedTiles = new Map();
+  loadingTiles = new Map();
+  groups = [];
+  groupMap = new Map();
+  rowGroupMap = new Map();
+  clearMarkers();
+  appliedSearchQuery = "";
+  selectedMarkerGroupNo = null;
+  currentGroupNo = null;
+  currentInfoOpenIndex = null;
+
+  try {
+    const [tileData, branchData] = await Promise.all([
+      fetchJsonFresh(resolveDataFile("tiles_index.json")),
+      fetchJsonFresh(resolveDataFile("branches.json")).catch(() => [])
+    ]);
+    tileMeta = tileData.tiles || [];
+    branchMeta = Array.isArray(branchData) ? branchData : [];
+
+    ensureUI();
+    startOverrideSync();
+    renderLoginStatus();
+    renderAdminDashboardButton();
+    if (isAdminUser()) renderAdminWorkerLocationButtons();
+    if (activeWorkType !== "reinforcement") await loadAllTiles();
+    await refresh();
+  } catch (e) {
+    alert(`${getWorkTypeLabel()} JSON 데이터를 불러오지 못했습니다. ${resolveDataFile("tiles_index.json")} 파일을 확인하세요.`);
+  }
+}
+
+function syncMapTypeButtons(control = document.getElementById("kdnMapTypeControl")) {
+  if (!control || !map) return;
+  const type = map.getMapTypeId();
+  const satellite = type === kakao.maps.MapTypeId.HYBRID || type === kakao.maps.MapTypeId.SKYVIEW;
+  control.querySelectorAll("button[data-map-mode]").forEach(button => {
+    const selected = (button.dataset.mapMode === "satellite") === satellite;
+    button.setAttribute("aria-pressed", String(selected));
+  });
+}
+
+function setMapViewMode(mode) {
+  if (!map || !["roadmap", "satellite"].includes(mode)) return;
+  const type = mode === "satellite" ? kakao.maps.MapTypeId.HYBRID : kakao.maps.MapTypeId.ROADMAP;
+  if (map.getMapTypeId() !== type) map.setMapTypeId(type);
+  syncMapTypeButtons();
+}
+
+function createMapTypeControl() {
+  const control = document.createElement("div");
+  control.id = "kdnMapTypeControl";
+  control.className = "kdn-map-type";
+  control.setAttribute("role", "group");
+  control.setAttribute("aria-label", "지도 형태");
+  [["roadmap", "지도"], ["satellite", "위성"]].forEach(([mode, label]) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.mapMode = mode;
+    button.textContent = label;
+    button.title = mode === "satellite" ? "위성사진과 도로명·지명 보기" : "일반 지도 보기";
+    button.onclick = event => {
+      event.preventDefault();
+      event.stopPropagation();
+      setMapViewMode(mode);
+    };
+    control.appendChild(button);
+  });
+  syncMapTypeButtons(control);
+  return control;
+}
+
+function ensureUI() {
+  const oldBar = document.getElementById("kdnControlBar");
+  if (oldBar) oldBar.remove();
+
+  if (!document.getElementById("kdn-ui-style")) {
+    const style = document.createElement("style");
+    style.id = "kdn-ui-style";
+    style.textContent = `
+      .kdn-bar {
+        position: fixed; top: 8px; left: 8px; right: 8px; z-index: 10;
+        display: flex; flex-direction: column; gap: 6px;
+        background: rgba(255,255,255,0.96); padding: 6px;
+        border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.12);
+        backdrop-filter: blur(6px);
+      }
+      .kdn-row { display:flex; gap:6px; align-items:center; }
+      .kdn-map-type {
+        display:flex;flex-shrink:0;gap:2px;height:38px;box-sizing:border-box;
+        padding:2px;border:1px solid #cbd5e1;border-radius:8px;background:#f1f5f9;
+      }
+      .kdn-map-type button {
+        border:none;border-radius:5px;background:transparent;color:#475569;
+        padding:0 10px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;
+      }
+      .kdn-map-type button[aria-pressed="true"] { background:#111827;color:#fff; }
+      .kdn-map-type button:focus-visible { outline:2px solid #2563eb;outline-offset:1px; }
+      .kdn-input, .kdn-search-btn, .kdn-reset-btn, .kdn-multi-button {
+        height: 38px; border: 1px solid #ddd; border-radius: 8px; background: #fff;
+        font-size: 13px; box-sizing: border-box;
+      }
+      .kdn-input { flex: 1; min-width: 0; padding: 0 10px; }
+      .kdn-search-btn, .kdn-reset-btn { padding: 0 12px; cursor: pointer; white-space: nowrap; }
+      .kdn-multi { position: relative; flex: 1; min-width: 0; }
+      .kdn-multi-button {
+        width: 100%; padding: 0 10px; display: flex; justify-content: space-between; align-items:center;
+        cursor:pointer; overflow:hidden;
+      }
+      .kdn-multi-label {
+        overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:block; text-align:left;
+      }
+      .kdn-multi-menu {
+        position:absolute; top:42px; left:0; right:0; background:#fff; border:1px solid #ddd;
+        border-radius:10px; box-shadow:0 8px 20px rgba(0,0,0,0.12); max-height:220px; overflow-y:auto;
+        -webkit-overflow-scrolling:touch; padding:6px; z-index:20;
+      }
+      .kdn-multi-item {
+        display:flex; align-items:center; gap:8px; font-size:13px; padding:6px 4px;
+        white-space: nowrap;
+      }
+      .kdn-multi-item input { width:16px; height:16px; flex-shrink:0; }
+      .kdn-count {
+        font-size: 12px;
+        color: #374151;
+        white-space: nowrap;
+        flex-shrink: 0;
+        padding: 0 4px;
+      }
+      .kdn-count-line {
+        font-size: 12px;
+        color: #111827;
+        font-weight: 700;
+        padding: 2px 4px 0;
+        white-space: nowrap;
+      }
+      .kdn-summary {
+        font-size: 12px;
+        color: #374151;
+        padding: 2px 4px 0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .kdn-dock {
+        position: fixed;
+        left: 50%;
+        transform: translateX(-50%);
+        bottom: 12px;
+        z-index: 11;
+        display: flex;
+        gap: 8px;
+        background: rgba(17,24,39,0.92);
+        padding: 8px 10px;
+        border-radius: 999px;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+        backdrop-filter: blur(8px);
+      }
+      .kdn-dock-btn {
+        border: none;
+        background: transparent;
+        color: #fff;
+        font-size: 12px;
+        padding: 6px 8px;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .kdn-status-actions { margin-top:8px;display:flex;gap:6px;align-items:center;flex-wrap:nowrap; }
+      .kdn-status-actions > button { flex-shrink:0;white-space:nowrap; }
+      .kdn-status-actions > select, .kdn-status-actions > .kdn-status-select { min-width:0;width:150px;flex:0 1 150px; }
+      .kdn-status-select {
+        height:32px;border:1px solid #d1d5db;border-radius:8px;padding:0 8px;
+        font-size:12px;background:#fff;display:flex;align-items:center;justify-content:space-between;gap:6px;cursor:pointer;
+      }
+      .kdn-status-value { overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+      .kdn-status-select:focus-visible { outline:2px solid #0891b2;outline-offset:2px; }
+      .kdn-status-menu {
+        position:fixed;z-index:10020;box-sizing:border-box;max-height:272px;overflow-y:auto;
+        padding:4px;border:1px solid #cbd5e1;border-radius:8px;background:#fff;
+        box-shadow:0 4px 16px rgba(0,0,0,.18);font-family:inherit;overscroll-behavior:contain;
+      }
+      .kdn-status-menu > button {
+        display:block;width:100%;min-height:36px;border:1px solid transparent;border-radius:4px;
+        padding:7px 8px;background:#fff;text-align:left;font-size:12px;font-family:inherit;cursor:pointer;white-space:normal;
+      }
+      .kdn-status-menu > button[aria-selected="true"] { background:#f1f5f9; }
+      .kdn-status-menu > button:hover:not(:disabled), .kdn-status-menu > button:focus-visible { background:#e0f2fe;border-color:#7dd3fc;outline:none; }
+      .kdn-status-menu > button:disabled { opacity:.55;cursor:default; }
+      .kdn-status-actions > .status-change-detail { flex-shrink:0;margin-left:auto;padding:6px 8px;font-size:11px; }
+      @media (max-width: 360px) {
+        .kdn-status-actions { gap:4px; }
+        .kdn-status-actions > button { padding:7px 6px !important;font-size:11px !important; }
+        .kdn-status-actions > select, .kdn-status-actions > .kdn-status-select { padding:0 2px !important;font-size:11px !important; }
+        .kdn-status-actions > .status-change-detail { padding:5px 6px;font-size:10px; }
+      }
+      @media (max-width: 640px) {
+        .kdn-input, .kdn-search-btn, .kdn-reset-btn, .kdn-multi-button { font-size:12px; }
+        .kdn-count, .kdn-count-line, .kdn-summary { font-size: 11px; }
+        .kdn-dock { bottom: 10px; }
+        .kdn-dock-btn { font-size: 11px; padding: 6px 6px; }
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  const bar = document.createElement("div");
+  bar.id = "kdnControlBar";
+  bar.className = "kdn-bar";
+
+  const workTypeRow = renderWorkTypeSwitcher();
+
+  const row1 = document.createElement("div");
+  row1.className = "kdn-row";
+
+  searchInput = document.createElement("input");
+  searchInput.id = "searchInput";
+  searchInput.className = "kdn-input";
+  searchInput.type = "text";
+  searchInput.placeholder = "검색";
+  searchInput.value = appliedSearchQuery || "";
+  searchInput.onkeydown = (e) => {
+    if (e.key === "Enter") {
+      appliedSearchQuery = (searchInput.value || "").trim();
+      refresh();
+    }
+  };
+
+  searchButton = document.createElement("button");
+  searchButton.className = "kdn-search-btn";
+  searchButton.type = "button";
+  searchButton.textContent = "검색";
+  searchButton.onclick = () => {
+    appliedSearchQuery = (searchInput.value || "").trim();
+    refresh();
+  };
+
+  currentLocationButton = document.createElement("button");
+  currentLocationButton.className = "kdn-reset-btn";
+  currentLocationButton.type = "button";
+  currentLocationButton.textContent = "현재위치";
+  currentLocationButton.onclick = () => { moveToCurrentLocation(); };
+
+  row1.appendChild(createMapTypeControl());
+  row1.appendChild(searchInput);
+  row1.appendChild(searchButton);
+  row1.appendChild(currentLocationButton);
+
+  const row2 = document.createElement("div");
+  row2.className = "kdn-row";
+
+  statusDropdown = document.createElement("div");
+  statusDropdown.id = "statusFilter";
+  statusDropdown.className = "kdn-multi";
+
+  regionDropdown = document.createElement("div");
+  regionDropdown.id = "regionFilter";
+  regionDropdown.className = "kdn-multi";
+
+  branchDropdown = document.createElement("div");
+  branchDropdown.id = "branchFilter";
+  branchDropdown.className = "kdn-multi";
+
+  const row3 = document.createElement("div");
+  row3.className = "kdn-row";
+
+  markerCountEl = document.createElement("div");
+  markerCountEl.className = "kdn-count-line";
+  row3.appendChild(markerCountEl);
+
+  const row4 = document.createElement("div");
+  row4.className = "kdn-summary";
+  statusSummaryEl = row4;
+
+  row2.appendChild(statusDropdown);
+  row2.appendChild(regionDropdown);
+  row2.appendChild(branchDropdown);
+
+  if (workTypeRow) bar.appendChild(workTypeRow);
+  bar.appendChild(row1);
+  bar.appendChild(row2);
+  bar.appendChild(row3);
+  bar.appendChild(row4);
+  document.body.appendChild(bar);
+
+  buildStatusFilter();
+  buildRegionFilter();
+  buildBranchFilter();
+  applyPermissionDefaults();
+  
+
+  if (!window.__kdnDocClickBound) {
+    document.addEventListener("click", function(e) {
+      if (!e.target.closest(".kdn-multi")) closeAllMenus();
+    });
+    window.__kdnDocClickBound = true;
+  }
+}
+
+function ensureInfoPanel() {
+  if (infoPanel) return infoPanel;
+
+  infoPanel = document.createElement("div");
+  infoPanel.id = "infoPanel";
+  infoPanel.style.position = "fixed";
+  infoPanel.style.left = "0";
+  infoPanel.style.right = "0";
+  infoPanel.style.bottom = "0";
+  infoPanel.style.zIndex = "9999";
+  infoPanel.style.background = "#ffffff";
+  infoPanel.style.borderTopLeftRadius = "16px";
+  infoPanel.style.borderTopRightRadius = "16px";
+  infoPanel.style.boxShadow = "0 -6px 20px rgba(0,0,0,0.18)";
+  infoPanel.style.maxHeight = "62vh";
+  infoPanel.style.display = "none";
+  infoPanel.style.flexDirection = "column";
+  infoPanel.style.overflow = "hidden";
+  infoPanel.style.fontFamily = '-apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif';
+  document.body.appendChild(infoPanel);
+  return infoPanel;
+}
+function closeInfo() {
+  closeStatusPicker();
+  const panel = ensureInfoPanel();
+  panel.style.display = "none";
+  panel.innerHTML = "";
+  currentGroupNo = null;
+  currentInfoOpenIndex = null;
+}
+window.closeInfo = closeInfo;
+
+function showDetail(idx) {
+  currentInfoOpenIndex = idx;
+  document.querySelectorAll(".detail-box").forEach(el => {
+    el.style.display = "none";
+  });
+  const target = document.getElementById("detail-" + idx);
+  if (target) target.style.display = "block";
+}
+window.showDetail = showDetail;
+
+
+function infoRowWithCopy(label, value, copyLabel) {
+  const safeValue = escapeHtml(value || "-");
+  const rawValue = encodeURIComponent(String(value || "")).replaceAll("'", "%27");
+  const isAddress = label === "주소" || label === "지번주소" || label === "도로명주소";
+  const mapUrl = `https://map.kakao.com/?q=${encodeURIComponent(String(value || "").trim())}`;
+
+  return `
+    <div style="display:flex;flex-direction:column;gap:4px;margin-bottom:8px;">
+      <div style="word-break:break-word;">
+        <strong>${label}:</strong> ${safeValue}
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;">
+        <button
+          onclick="copyFieldValue(decodeURIComponent('${rawValue}'), '${copyLabel}')"
+          style="border:1px solid #d1d5db;background:#fff;color:#111827;padding:4px 8px;border-radius:8px;font-size:11px;cursor:pointer;">
+          복사
+        </button>
+        ${isAddress ? `<a href="${mapUrl}" target="_blank" rel="noopener noreferrer"
+          style="display:inline-block;border:1px solid #d1d5db;background:#fff;color:#111827;padding:4px 8px;border-radius:8px;font-size:11px;text-decoration:none;line-height:1.5;">
+          카카오맵
+        </a>` : ``}
+      </div>
+    </div>
+  `;
+}
+
+
+function infoRowsWithIndividualCopy(label, values, copyLabel) {
+  const rows = Array.isArray(values) ? values : [];
+  const htmlValues = rows.map(item => {
+    const meter = String(item.meter || "").trim() || "-";
+    const apt = String(item.apt || "").trim();
+    const store = String(item.store || "").trim();
+
+    const raw = encodeURIComponent(meter).replaceAll("'", "%27");
+    return `
+      <div class="meter-item" style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-top:8px;padding:10px;border:1px solid #e5e7eb;border-radius:8px;">
+        <div style="flex:1;word-break:break-word;">
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <strong>${escapeHtml(meter)}</strong>
+            ${item.status ? `<span style="font-size:11px;color:#475569;">${renderStatusPickerLabel({ value: item.status, textContent: getStatusOptionLabel(item.status) })}</span>` : ""}
+          </div>
+          ${apt ? `<div style="font-size:12px;color:#555;">공동주택명: ${escapeHtml(apt)}</div>` : ``}
+          ${store ? `<div style="font-size:12px;color:#555;">상호명: ${escapeHtml(store)}</div>` : ``}
+          ${showsContractNumbers() ? infoContractRows([item.contract]) : ""}
+        </div>
+        <button onclick="copyFieldValue(decodeURIComponent('${raw}'),'계기번호')" style="font-size:11px;">복사</button>
+      </div>
+    `;
+  }).join("");
+
+  return `<div><strong>${label}</strong><div>${htmlValues}</div></div>`;
+}
+
+
+function ensureRequestPopup() {
+  let popup = document.getElementById("kdnRequestPopup");
+  if (popup) return popup;
+  popup = document.createElement("div");
+  popup.id = "kdnRequestPopup";
+  popup.style.position = "fixed";
+  popup.style.inset = "0";
+  popup.style.zIndex = "30000";
+  popup.style.background = "rgba(17,24,39,0.55)";
+  popup.style.display = "none";
+  popup.style.alignItems = "center";
+  popup.style.justifyContent = "center";
+  popup.style.padding = "18px";
+  popup.style.boxSizing = "border-box";
+  document.body.appendChild(popup);
+  return popup;
+}
+
+function ensureMarkerMemoPopup() {
+  let popup = document.getElementById("kdnMarkerMemoPopup");
+  if (popup) return popup;
+  popup = document.createElement("div");
+  popup.id = "kdnMarkerMemoPopup";
+  popup.style.position = "fixed";
+  popup.style.inset = "0";
+  popup.style.zIndex = "30000";
+  popup.style.background = "rgba(17,24,39,0.55)";
+  popup.style.display = "none";
+  popup.style.alignItems = "center";
+  popup.style.justifyContent = "center";
+  popup.style.padding = "18px";
+  popup.style.boxSizing = "border-box";
+  document.body.appendChild(popup);
+  return popup;
+}
+
+function closeMarkerMemoPopup() {
+  const popup = document.getElementById("kdnMarkerMemoPopup");
+  if (popup) {
+    popup.style.display = "none";
+    popup.innerHTML = "";
+  }
+}
+window.closeMarkerMemoPopup = closeMarkerMemoPopup;
+
+window.openMarkerMemoPopup = function(encodedGroupNo) {
+  const popup = ensureMarkerMemoPopup();
+  let groupNo = "";
+  try { groupNo = decodeURIComponent(String(encodedGroupNo || "")); } catch (e) { groupNo = String(encodedGroupNo || ""); }
+  const group = groupMap.get(groupNo);
+  if (!group) {
+    alert("메모를 연결할 마커를 찾지 못했습니다.");
+    return;
+  }
+
+  const memoKey = getMarkerMemoDocKey(group.n);
+  const memo = markerMemos[memoKey] || {};
+  const existingText = String(memo.text || "");
+  popup.innerHTML = `
+    <div style="width:min(560px,100%);max-height:78vh;background:#fff;border-radius:18px;box-shadow:0 20px 60px rgba(0,0,0,.3);overflow:hidden;">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:14px 16px;border-bottom:1px solid #e5e7eb;">
+        <strong style="font-size:16px;">마커 메모</strong>
+        <button type="button" onclick="closeMarkerMemoPopup()" style="width:34px;height:34px;border:none;border-radius:999px;background:#f3f4f6;font-size:20px;cursor:pointer;">×</button>
+      </div>
+      <div style="padding:16px;">
+        <div style="font-size:12px;color:#6b7280;margin-bottom:8px;line-height:1.5;">이 메모는 현재 마커에 저장되며, 다음에 다시 열어 확인할 수 있습니다.</div>
+        <textarea id="kdnMarkerMemoText" maxlength="2000" placeholder="이 마커에 남길 내용을 입력하세요."
+          style="width:100%;min-height:180px;box-sizing:border-box;border:1px solid #d1d5db;border-radius:12px;padding:12px;resize:vertical;font-size:14px;line-height:1.6;">${escapeHtml(existingText)}</textarea>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px;">
+          <button type="button" onclick="closeMarkerMemoPopup()" style="border:1px solid #d1d5db;background:#fff;color:#111827;padding:9px 14px;border-radius:10px;font-size:13px;cursor:pointer;">취소</button>
+          <button type="button" id="kdnMarkerMemoSaveBtn" style="border:none;background:#111827;color:#fff;padding:9px 14px;border-radius:10px;font-size:13px;font-weight:800;cursor:pointer;">저장</button>
+        </div>
+      </div>
+    </div>`;
+  popup.style.display = "flex";
+
+  const saveButton = popup.querySelector("#kdnMarkerMemoSaveBtn");
+  if (saveButton) saveButton.onclick = () => saveMarkerMemoFromPopup(group.n);
+};
+
+async function saveMarkerMemoFromPopup(groupNo) {
+  const group = groupMap.get(groupNo);
+  const popup = ensureMarkerMemoPopup();
+  const textarea = popup.querySelector("#kdnMarkerMemoText");
+  if (!group || !textarea) return;
+  if (!currentUser) {
+    renderAuthPanel("로그인 후 메모를 저장할 수 있습니다.");
+    return;
+  }
+
+  const memoKey = getMarkerMemoDocKey(group.n);
+  const previous = markerMemos[memoKey];
+  const text = String(textarea.value || "").trim();
+  markerMemos[memoKey] = {
+    text,
+    groupNo: String(group.n),
+    updatedAtMs: Date.now(),
+    updatedByEmail: currentUser.email || "",
+    updatedByUid: currentUser.uid || ""
+  };
+  saveMarkerMemos();
+
+  const saveButton = popup.querySelector("#kdnMarkerMemoSaveBtn");
+  if (saveButton) {
+    saveButton.disabled = true;
+    saveButton.textContent = "저장 중...";
+  }
+
+  try {
+    await saveRemoteMarkerMemo(group, text);
+    closeMarkerMemoPopup();
+    renderInfo(group);
+  } catch (e) {
+    if (previous) markerMemos[memoKey] = previous;
+    else delete markerMemos[memoKey];
+    saveMarkerMemos();
+    if (String(e.message || "") === "not-authorized") {
+      alert("담당 권역/지사만 메모를 저장할 수 있습니다.");
+    } else if (String(e.message || "") !== "not-authenticated") {
+      alert("메모 저장 실패: Firebase 권한/네트워크를 확인하세요.");
+    }
+    if (saveButton) {
+      saveButton.disabled = false;
+      saveButton.textContent = "저장";
+    }
+  }
+}
+window.saveMarkerMemoFromPopup = saveMarkerMemoFromPopup;
+
+window.openRequestPopup = function(encodedText) {
+  const popup = ensureRequestPopup();
+  let value = "";
+  try { value = decodeURIComponent(String(encodedText || "")); } catch (e) { value = String(encodedText || ""); }
+  popup.innerHTML = `
+    <div style="width:min(520px,100%);max-height:75vh;background:#fff;border-radius:18px;box-shadow:0 20px 60px rgba(0,0,0,.3);overflow:hidden;">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:14px 16px;border-bottom:1px solid #e5e7eb;">
+        <strong style="font-size:16px;">요청사항</strong>
+        <button type="button" onclick="closeRequestPopup()" style="width:34px;height:34px;border:none;border-radius:999px;background:#f3f4f6;font-size:20px;cursor:pointer;">×</button>
+      </div>
+      <div style="padding:16px;overflow-y:auto;max-height:calc(75vh - 64px);font-size:14px;line-height:1.7;white-space:pre-wrap;word-break:break-word;">${escapeHtml(value || "요청사항 없음")}</div>
+    </div>`;
+  popup.style.display = "flex";
+};
+window.closeRequestPopup = function() {
+  const popup = document.getElementById("kdnRequestPopup");
+  if (popup) {
+    popup.style.display = "none";
+    popup.innerHTML = "";
+  }
+};
+
+function renderExtraWorkDetails(bucket) {
+  if (activeWorkType === "reinforcement") return "";
+  return bucket.rows.map((r, localIdx) => {
+    const requestValue = String(r.request || "").trim();
+    const encodedRequest = encodeURIComponent(requestValue).replaceAll("'", "%27");
+    const meter = escapeHtml(r.m || "-");
+    return `
+      <div style="margin-top:10px;padding-top:10px;border-top:1px dashed #d1d5db;">
+        ${bucket.rows.length > 1 ? `<div style="font-weight:900;margin-bottom:6px;color:#111827;">계기 ${meter}</div>` : ""}
+        ${activeWorkType === "high_voltage" ? `
+          <div><strong>계약전력:</strong> ${escapeHtml(String(r.contractPower ?? "").trim() || "-")}</div>
+          <div><strong>용도:</strong> ${escapeHtml(String(r.purpose ?? "").trim() || "-")}</div>
+        ` : `
+          <div><strong>신청자:</strong> ${escapeHtml(r.applicant || "-")}</div>
+          <div><strong>신청자연락처:</strong> ${escapeHtml(r.applicantPhone || "-")}</div>
+        `}
+        <div><strong>고객명:</strong> ${escapeHtml(r.customerName || "-")}</div>
+        <div><strong>고객연락처_1:</strong> ${escapeHtml(r.customerPhone1 || "-")}</div>
+        <div><strong>고객연락처_2:</strong> ${escapeHtml(r.customerPhone2 || "-")}</div>
+        ${usesLowVoltageStatuses() ? `<div style="white-space:pre-wrap;word-break:break-word;"><strong>고객연락 여부:</strong> ${escapeHtml(String(r.customerContactStatus ?? "").trim() || "-")}</div>` : ""}
+        <div><strong>검침원:</strong> ${escapeHtml(r.meterReader || "-")}</div>
+        <div><strong>검침원연락처:</strong> ${escapeHtml(r.meterReaderPhone || "-")}</div>
+        <div style="margin:7px 0;">
+          <strong>요청사항:</strong>
+          <button type="button" onclick="openRequestPopup('${encodedRequest}')"
+            style="margin-left:6px;border:none;background:#2563eb;color:#fff;padding:5px 9px;border-radius:8px;font-size:11px;font-weight:800;cursor:pointer;">
+            요청사항
+          </button>
+        </div>
+        <div><strong>모뎀맥:</strong> ${escapeHtml(r.modemMac || "-")}</div>
+      </div>
+    `;
+  }).join("");
+}
+
+
+function infoContractRows(values) {
+  const rows = Array.isArray(values) ? values : [];
+  const htmlValues = rows.map(value => {
+    const contract = String(value || "").trim() || "-";
+    const raw = encodeURIComponent(contract).replaceAll("'", "%27");
+    return `
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:8px;">
+        <div style="flex:1;word-break:break-word;">${escapeHtml(contract)}</div>
+        <button onclick="copyFieldValue(decodeURIComponent('${raw}'),'계약번호')" style="font-size:11px;">복사</button>
+      </div>
+    `;
+  }).join("");
+  return `<div><strong>계약번호</strong><div>${htmlValues}</div></div>`;
+}
+
+// 상세정보의 작업자 현재상태에도 관리자와 동일한 색상 아이콘을 표시합니다.
+function getStatusOptionLabel(status) {
+  const options = getWorkStatusOptions();
+  if (options) {
+    const label = normalizeStatus(status);
+    const item = options.find(item => item.value === label);
+    if (item) return `${item.icon} ${label}`;
+    if (label === "초긴급") return `⚫ ${label}`;
+  }
+  const icons = {
+    "긴급": "⚫",
+    "계기교체(1순위)": "🔴",
+    "계기교체(2순위)": "🟣",
+    "계기교체(3순위)": "🟡",
+    "모뎀설치": "🟢",
+    "작업불가": "🟤",
+    "재방문": "●",
+    "PPA": "🔵",
+    "초긴급": "🔴",
+    "점검": "🟠",
+    "험로": "🟣"
+  };
+  const label = String(status || "").trim();
+  return icons[label] ? `${icons[label]} ${label}` : label;
+}
+
+// 기본 select의 팝업은 OS에 따라 option 색상을 무시하므로 상세창의 표시만 보완합니다.
+// 원래 select의 선택지, disabled 조건, change 이벤트는 그대로 사용합니다.
+let statusPickerCleanup = null;
+function closeStatusPicker(restoreFocus = false) {
+  const cleanup = statusPickerCleanup;
+  statusPickerCleanup = null;
+  if (cleanup) cleanup(restoreFocus);
+}
+
+function renderStatusPickerLabel(option) {
+  const label = String(option?.textContent || "상태없음").trim();
+  const status = normalizeComparableStatus(normalizeStatus(option?.value || ""));
+  const color = getWorkStatusColor(status) || {
+    "긴급": "black", "초긴급": "red", "MKAMI": "red", "PPA": "blue",
+    "계기교체(1순위)": "red", "계기교체(2순위)": "orange", "계기교체(3순위)": "yellow",
+    "점검": "orange", "험로": "purple", "모뎀설치": "green", "작업불가": "brown", "재방문": "teal"
+  }[status];
+  const plainLabel = label.replace(/^[🔴🔵🟡🟠🟣🟢🟤⚫⚪●]\uFE0F?\s*/u, "");
+  return color ? renderStatusDot(color) + escapeHtml(plainLabel) : escapeHtml(label);
+}
+
+function updateStatusPickerButton(select, button) {
+  const option = select.selectedOptions[0];
+  button.innerHTML = `<span class="kdn-status-value">${renderStatusPickerLabel(option)}</span><span aria-hidden="true">▾</span>`;
+  button.setAttribute("aria-label", `작업상태: ${option?.textContent.trim() || "상태없음"}`);
+  button.style.color = "#374151";
+}
+
+function openStatusPicker(select, button, last = false) {
+  const wasOpen = button.getAttribute("aria-expanded") === "true";
+  closeStatusPicker();
+  if (wasOpen || !select.isConnected) return;
+  const menu = document.createElement("div");
+  menu.id = "kdnStatusPickerMenu";
+  menu.className = "kdn-status-menu";
+  menu.setAttribute("role", "listbox");
+  menu.setAttribute("aria-label", "작업상태 선택");
+  const choices = [];
+  Array.from(select.options).filter(option => !option.hidden).forEach(option => {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.tabIndex = -1;
+    item.disabled = option.disabled;
+    item.setAttribute("role", "option");
+    item.setAttribute("aria-selected", String(option.selected));
+    item.style.color = "#374151";
+    item.innerHTML = renderStatusPickerLabel(option);
+    item.onclick = () => {
+      const changed = select.value !== option.value;
+      select.value = option.value;
+      updateStatusPickerButton(select, button);
+      closeStatusPicker(true);
+      if (changed) select.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+    menu.appendChild(item);
+    if (!item.disabled) choices.push(item);
+  });
+  document.body.appendChild(menu);
+  const rect = button.getBoundingClientRect();
+  const viewport = window.visualViewport;
+  const leftEdge = (viewport?.offsetLeft || 0) + 8;
+  const topEdge = (viewport?.offsetTop || 0) + 8;
+  const rightEdge = leftEdge + (viewport?.width || window.innerWidth) - 16;
+  const bottomEdge = topEdge + (viewport?.height || window.innerHeight) - 16;
+  const width = Math.min(Math.max(rect.width, 180), rightEdge - leftEdge);
+  const above = rect.top - topEdge - 4;
+  const below = bottomEdge - rect.bottom - 4;
+  const openAbove = below < Math.min(272, menu.scrollHeight) && above > below;
+  menu.style.width = `${width}px`;
+  menu.style.maxHeight = `${Math.max(44, Math.min(272, openAbove ? above : below))}px`;
+  menu.style.left = `${Math.max(leftEdge, Math.min(rect.left, rightEdge - width))}px`;
+  menu.style.top = `${openAbove ? Math.max(topEdge, rect.top - menu.offsetHeight - 4) : rect.bottom + 4}px`;
+  button.setAttribute("aria-expanded", "true");
+  button.setAttribute("aria-controls", menu.id);
+  const onOutside = event => {
+    if (!menu.contains(event.target) && !button.contains(event.target)) closeStatusPicker();
+  };
+  const onScroll = event => { if (!menu.contains(event.target)) closeStatusPicker(); };
+  const onResize = () => closeStatusPicker();
+  statusPickerCleanup = restoreFocus => {
+    document.removeEventListener("pointerdown", onOutside, true);
+    document.removeEventListener("scroll", onScroll, true);
+    window.removeEventListener("resize", onResize);
+    viewport?.removeEventListener("resize", onResize);
+    menu.remove();
+    button.setAttribute("aria-expanded", "false");
+    button.removeAttribute("aria-controls");
+    if (restoreFocus && button.isConnected) button.focus({ preventScroll: true });
+  };
+  document.addEventListener("pointerdown", onOutside, true);
+  document.addEventListener("scroll", onScroll, true);
+  window.addEventListener("resize", onResize);
+  viewport?.addEventListener("resize", onResize);
+  menu.onfocusout = event => {
+    if (!menu.contains(event.relatedTarget) && event.relatedTarget !== button) closeStatusPicker();
+  };
+  menu.onkeydown = event => {
+    if (event.key === "Escape") {
+      event.preventDefault(); event.stopPropagation(); closeStatusPicker(true);
+    } else if (event.key === "Tab") {
+      closeStatusPicker(true);
+    } else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key) && choices.length) {
+      event.preventDefault();
+      const index = choices.indexOf(document.activeElement);
+      const next = event.key === "Home" ? 0 : event.key === "End" ? choices.length - 1
+        : (index + (event.key === "ArrowUp" ? -1 : 1) + choices.length) % choices.length;
+      choices[next].focus({ preventScroll: true });
+      choices[next].scrollIntoView({ block: "nearest" });
+    }
+  };
+  const selected = choices.find(item => item.getAttribute("aria-selected") === "true");
+  (selected || (last ? choices[choices.length - 1] : choices[0]))?.focus({ preventScroll: true });
+}
+
+function enhanceStatusPickers(panel) {
+  panel.querySelectorAll(".kdn-status-actions > select").forEach(select => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "kdn-status-select";
+    button.setAttribute("aria-haspopup", "listbox");
+    button.setAttribute("aria-expanded", "false");
+    updateStatusPickerButton(select, button);
+    button.onclick = () => openStatusPicker(select, button);
+    button.onkeydown = event => {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault(); openStatusPicker(select, button, event.key === "ArrowUp");
+      }
+    };
+    select.before(button);
+    select.style.display = "none";
+  });
+}
+
+
+function renderInfo(group) {
+  closeStatusPicker();
+  if (!canAccessGroup(group)) {
+    closeInfo();
+    return;
+  }
+  const panel = ensureInfoPanel();
+  currentGroupNo = group.n;
+  if (currentInfoOpenIndex === null) currentInfoOpenIndex = 0;
+
+  const titleAddress = escapeHtml(getRepresentativeAddress(group));
+  const encodedMemoGroupNo = encodeURIComponent(String(group.n || ""));
+  const hasMemo = !!String((markerMemos[getMarkerMemoDocKey(group.n)] || {}).text || "").trim();
+  const rows = Array.isArray(group.rows) ? group.rows : [];
+
+  const buckets = [];
+  const bucketMap = new Map();
+
+  getVisibleRowEntries(group).forEach(({ row: r, index: i }) => {
+    const rowStatus = normalizeComparableStatus(getRowStatus(group.n, i, r));
+
+    // 현재상태가 빈칸인 행은 정보확인에서 제외
+    if (!rowStatus) return;
+
+    const key = String(r.addressGroupKey || normalizeAddressGroupKey(r.f, r.r) || `__empty_${i}`);
+    if (!bucketMap.has(key)) {
+      bucketMap.set(key, {
+        key,
+        indices: [],
+        rows: []
+      });
+      buckets.push(bucketMap.get(key));
+    }
+    const bucket = bucketMap.get(key);
+    bucket.indices.push(i);
+    bucket.rows.push(r);
+  });
+
+  const items = buckets.map((bucket, bucketIndex) => {
+    const first = bucket.rows[0] || {};
+    const address = escapeHtml(getBaseAddressLabel(first.f, first.r) || "주소 없음");
+    const commonValue = (field, isAddress = false) => getCommonInfoValue(bucket.rows, field, isAddress);
+    const statusList = bucket.indices.map(idx => String(getRowStatus(group.n, idx, rows[idx]) || "").trim()).filter(Boolean);
+    const uniqueStatuses = [...new Set(statusList)];
+    const currentStatus = uniqueStatuses.length ? uniqueStatuses[0] : "";
+    // 우측 상단 상태 배지는 Firebase 변경값이 아니라 엑셀/JSON 원본 현재상태(k)를 표시
+    const originalStatus = [...new Set(bucket.rows.map(r => getOriginalRowStatus(r)).filter(Boolean))].join(" / ") || "-";
+    const open = currentInfoOpenIndex === bucketIndex ? "block" : "none";
+    const indexList = bucket.indices.join(",");
+    const meterValues = bucket.rows.map((r, localIdx) => ({
+      meter: r.m || "", apt: r.h || "", store: r.i || "", contract: r.c || "",
+      status: getRowStatus(group.n, bucket.indices[localIdx], r)
+    }));
+
+    // 모든 시트의 작업자 계정은 세 가지 작업 처리 결과 중에서 선택합니다.
+    let statusOptionsHtml = !isAdminUser() ? `
+            ${currentStatus && !COMPLETION_STATUSES.includes(currentStatus) ? `<option value="${escapeHtml(currentStatus)}" style="color:${getStatusTextColor(currentStatus)}" selected disabled>${escapeHtml(getStatusOptionLabel(currentStatus))} (현재상태)</option>` : ""}
+            ${COMPLETION_STATUSES.map(status => `<option value="${status}" style="color:${getStatusTextColor(status)}" ${currentStatus === status ? "selected" : ""}>${getStatusOptionLabel(status)}</option>`).join("")}
+      ` : getWorkStatusOptions() ? buildWorkStatusOptions(currentStatus) : `
+            <option value="" ${!currentStatus ? "selected" : ""}>상태없음</option>
+            <option value="긴급" ${currentStatus === "긴급" ? "selected" : ""}>⚫ 긴급</option>
+            <option value="계기교체(1순위)" ${currentStatus === "계기교체(1순위)" ? "selected" : ""}>🔴 계기교체(1순위)</option>
+            <option value="계기교체(2순위)" ${currentStatus === "계기교체(2순위)" ? "selected" : ""}>🟣 계기교체(2순위)</option>
+            <option value="계기교체(3순위)" ${currentStatus === "계기교체(3순위)" ? "selected" : ""}>🟡 계기교체(3순위)</option>
+            <option value="모뎀설치" ${currentStatus === "모뎀설치" ? "selected" : ""}>🟢 모뎀설치</option>
+            <option value="작업불가" ${currentStatus === "작업불가" ? "selected" : ""}>🟤 작업불가</option>
+            <option value="재방문" style="color:${getStatusTextColor("재방문")}" ${currentStatus === "재방문" ? "selected" : ""}>● 재방문</option>
+      `;
+    if (uniqueStatuses.length > 1) {
+      statusOptionsHtml = `<option value="" selected disabled>상태 혼합 (${escapeHtml(uniqueStatuses.join(" / "))})</option>` +
+        statusOptionsHtml.replace(/ selected(?=[ >])/g, "");
+    }
+
+    return `
+      <div style="border:1px solid #ececec;border-radius:12px;padding:10px;margin-bottom:10px;background:#fafafa;">
+        <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;">
+          <div style="flex:1;font-size:13px;line-height:1.45;word-break:break-word;">${address}</div>
+          <div style="flex-shrink:0;max-width:100%;display:flex;flex-direction:column;align-items:flex-end;">
+            <div style="font-size:11px;padding:4px 8px;border-radius:999px;background:#f1f5f9;color:#334155;word-break:break-word;">${escapeHtml(originalStatus)}</div>
+          </div>
+        </div>
+
+        <div class="kdn-status-actions">
+          <button onclick="showDetail(${bucketIndex})"
+            style="border:none;background:#111827;color:#fff;padding:7px 10px;border-radius:10px;font-size:12px;cursor:pointer;">
+            정보확인
+          </button>
+
+          <select onchange="changeGroupedStatus('${escapeHtml(group.n)}', '${indexList}', this.value)"
+            style="height:32px;border:1px solid #d1d5db;border-radius:8px;padding:0 8px;font-size:12px;background:#fff;color:${uniqueStatuses.length === 1 ? getStatusTextColor(currentStatus) : "#374151"};">
+            ${statusOptionsHtml}
+          </select>
+          ${isAdminUser() ? renderStatusChangeDetails(getBucketStatusChange(group, bucket)) : ""}
+        </div>
+
+        <div id="detail-${bucketIndex}" class="detail-box"
+          style="display:${open};margin-top:8px;padding:10px;border:1px solid #e5e7eb;border-radius:10px;background:#fff;font-size:12px;line-height:1.6;word-break:break-word;">
+          <div class="common-meter-info">
+            ${infoRowWithCopy("인입주명", commonValue("inflowName") || group.b || "-", "인입주명")}
+            ${infoRowWithCopy("인입주번호", commonValue("inflowNo") || (group.grouping !== "coordinate-v1" ? group.n : "") || "-", "인입주번호")}
+            ${infoRowWithCopy("지번주소", commonValue("f", true) || "-", "지번주소")}
+            ${infoRowWithCopy("도로명주소", commonValue("r", true) || "-", "도로명주소")}
+            ${infoRowWithCopy("변대전산화", commonValue("n2") || "-", "변대전산화")}
+            ${infoRowWithCopy("변대주명", commonValue("o") || "-", "변대주명")}
+            ${commonValue("j") ? `<div style="margin-bottom:10px;"><strong>비고:</strong> ${escapeHtml(commonValue("j"))}</div>` : ""}
+          </div>
+          ${infoRowsWithIndividualCopy("계기번호", meterValues, "계기번호")}
+          ${renderExtraWorkDetails(bucket)}
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  panel.innerHTML = `
+    <div style="height:5px;width:42px;border-radius:999px;background:#d1d5db;margin:8px auto 0;"></div>
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px 8px;border-bottom:1px solid #eef2f7;gap:8px;">
+      <div class="kdn-marker-title" style="font-size:15px;font-weight:700;line-height:1.35;word-break:break-word;padding-right:10px;">
+        ${titleAddress}
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+        <button type="button" onclick="openMarkerMemoPopup('${encodedMemoGroupNo}')"
+          style="border:1px solid ${hasMemo ? "#0891b2" : "#d1d5db"};background:${hasMemo ? "#ecfeff" : "#fff"};color:${hasMemo ? "#0e7490" : "#111827"};padding:7px 9px;border-radius:9px;font-size:12px;font-weight:800;cursor:pointer;">
+          메모${hasMemo ? " ✓" : ""}
+        </button>
+        <button onclick="closeInfo()"
+          style="width:34px;height:34px;border:none;border-radius:999px;background:#f3f4f6;font-size:18px;cursor:pointer;flex-shrink:0;">
+          ×
+        </button>
+      </div>
+    </div>
+    <div style="overflow-y:auto;-webkit-overflow-scrolling:touch;padding:12px 14px 16px;max-height:calc(62vh - 58px);">
+      ${items || '<div style="text-align:center;color:#6b7280;font-size:13px;padding:12px 0;">표시할 정보가 없습니다.</div>'}
+      <div style="font-size:11px;color:#6b7280;margin-top:4px;">상태를 선택하면 해당 주소 묶음에 표시된 계기들에 함께 적용됩니다.</div>
+    </div>
+  `;
+  panel.style.display = "flex";
+  enhanceStatusPickers(panel);
+}
+
+window.changeGroupedStatus = async function(groupNo, indexList, value) {
+  const indices = [...new Set(String(indexList ?? "")
+    .split(",")
+    .filter(v => v.trim() !== "")
+    .map(v => Number(v))
+  )];
+
+  // 화면 밖에서 호출해도 작업자 계정은 세 가지 처리 결과만 저장합니다.
+  if (!isAdminUser() && !COMPLETION_STATUSES.includes(value)) {
+    alert("작업자 계정은 모뎀설치, 작업불가 또는 재방문으로만 변경할 수 있습니다.");
+    const currentGroup = groupMap.get(groupNo);
+    if (currentGroup) renderInfo(currentGroup);
+    return;
+  }
+
+  const previous = { ...statusOverrides };
+
+  const group = groupMap.get(groupNo);
+
+  if (!canAccessGroup(group)) {
+    alert("담당 권역/지사만 상태 변경할 수 있습니다.");
+    return;
+  }
+
+  if (!indices.length || indices.some(idx => !Number.isInteger(idx) || !group.rows?.[idx])) {
+    alert("변경할 계기 정보를 확인하세요.");
+    return;
+  }
+  if (indices.some(idx => !canAccessRow(group.rows[idx]))) {
+    alert("본인에게 할당된 계기 또는 미할당 계기만 상태 변경할 수 있습니다.");
+    return;
+  }
+
+  indices.forEach(idx => {
+    const row = group && Array.isArray(group.rows) ? group.rows[idx] : {};
+    const key = getStableRowKey(groupNo, idx, row);
+    statusOverrides[key] = value;
+  });
+  saveOverrides();
+
+  if (group) {
+    const marker = markerMap.get(groupNo);
+    if (marker) updateMarkerAppearance(marker, group);
+    renderInfo(group);
+  }
+  refresh();
+
+  try {
+    await Promise.all(indices.map(idx => {
+      const row = group && Array.isArray(group.rows) ? group.rows[idx] : {};
+      return saveRemoteOverride(groupNo, idx, row, value);
+    }));
+  } catch (e) {
+    statusOverrides = previous;
+    saveOverrides();
+    if (group) renderInfo(group);
+    refresh();
+    if (String(e.message || "") !== "not-authenticated") {
+      alert("상태 저장 실패: Firebase 권한/네트워크를 확인하세요.");
+    }
+  }
+};
+
+window.changeRowStatus = function(groupNo, idx, value) {
+  window.changeGroupedStatus(groupNo, String(idx), value);
+};
+
+
+function getDisplayUserId(email) {
+  const value = String(email || "").trim();
+  if (!value) return "";
+  return value.replace("@kdn.local", "");
+}
+
+function clearLatestUpdateLabel() {
+  if (latestUpdateOverlay) {
+    latestUpdateOverlay.setMap(null);
+    latestUpdateOverlay = null;
+  }
+}
+
+function createWorkerLabelContent(userId) {
+  const content = document.createElement("div");
+  content.style.position = "relative";
+  content.style.transform = "translateY(-30px)";
+  content.style.background = "#111827";
+  content.style.color = "#ffffff";
+  content.style.border = "2px solid #ffffff";
+  content.style.borderRadius = "999px";
+  content.style.padding = "5px 9px";
+  content.style.fontSize = "12px";
+  content.style.fontWeight = "700";
+  content.style.lineHeight = "1";
+  content.style.whiteSpace = "nowrap";
+  content.style.boxShadow = "0 4px 14px rgba(0,0,0,0.22)";
+  content.style.pointerEvents = "none";
+  content.textContent = userId;
+
+  const tail = document.createElement("div");
+  tail.style.position = "absolute";
+  tail.style.left = "50%";
+  tail.style.bottom = "-7px";
+  tail.style.transform = "translateX(-50%) rotate(45deg)";
+  tail.style.width = "10px";
+  tail.style.height = "10px";
+  tail.style.background = "#111827";
+  tail.style.borderRight = "2px solid #ffffff";
+  tail.style.borderBottom = "2px solid #ffffff";
+  content.appendChild(tail);
+
+  return content;
+}
+
+function clearAdminWorkerLocationLabels() {
+  adminWorkerLocationOverlays.forEach(overlay => overlay.setMap(null));
+  adminWorkerLocationOverlays = [];
+}
+
+async function showAdminWorkerLocationLabels(region) {
+  if (!isAdminUser()) return;
+  adminWorkerLocationRegion = region;
+  clearAdminWorkerLocationLabels();
+
+  if (!region) {
+    updateAdminRegionButtonState();
+    return;
+  }
+
+  await loadAllTiles();
+
+  const workersByRegion = getWorkersByRegion();
+  const workers = workersByRegion[region] || [];
+
+  workers.forEach(userId => {
+    const update = getWorkerLastUpdate(userId);
+    if (!update || !update.groupNo) return;
+
+    const group = findGroupForUpdate(update);
+    if (!group) return;
+
+    const overlay = new kakao.maps.CustomOverlay({
+      position: new kakao.maps.LatLng(group.y, group.x),
+      content: createWorkerLabelContent(userId),
+      yAnchor: 1.1,
+      zIndex: 10001
+    });
+
+    overlay.setMap(map);
+    adminWorkerLocationOverlays.push(overlay);
+  });
+
+  updateAdminRegionButtonState();
+}
+
+async function toggleActiveWorkTypeWorkerLocations() {
+  if (!isAdminUser() || activeWorkType === "reinforcement") return;
+
+  // 같은 버튼을 다시 누르면 작업자 위치 말풍선을 해제합니다.
+  if (adminWorkerLocationRegion === activeWorkType && adminWorkerLocationOverlays.length) {
+    adminWorkerLocationRegion = null;
+    clearAdminWorkerLocationLabels();
+    updateAdminRegionButtonState();
+    return;
+  }
+
+  adminWorkerLocationRegion = activeWorkType;
+  clearAdminWorkerLocationLabels();
+  await loadAllTiles();
+
+  getWorkersForActiveWorkType().forEach(userId => {
+    const update = getWorkerLastUpdate(userId);
+    if (!update || !update.groupNo) return;
+    const group = findGroupForUpdate(update);
+    if (!group) return;
+
+    const overlay = new kakao.maps.CustomOverlay({
+      position: new kakao.maps.LatLng(group.y, group.x),
+      content: createWorkerLabelContent(userId),
+      yAnchor: 1.1,
+      zIndex: 10001
+    });
+    overlay.setMap(map);
+    adminWorkerLocationOverlays.push(overlay);
+  });
+  updateAdminRegionButtonState();
+}
+
+function toggleAdminWorkerRegion(region) {
+  if (!isAdminUser()) return;
+  if (adminWorkerLocationRegion === region && adminWorkerLocationOverlays.length) {
+    adminWorkerLocationRegion = null;
+    clearAdminWorkerLocationLabels();
+    updateAdminRegionButtonState();
+    return;
+  }
+  showAdminWorkerLocationLabels(region);
+}
+
+function updateAdminRegionButtonState() {
+  if (!adminWorkerLocationButtonsBox) return;
+  adminWorkerLocationButtonsBox.querySelectorAll("[data-admin-map-region]").forEach(btn => {
+    const active = adminWorkerLocationRegion === btn.getAttribute("data-admin-map-region") && adminWorkerLocationOverlays.length;
+    btn.style.background = active ? "#111827" : "#ffffff";
+    btn.style.color = active ? "#ffffff" : "#111827";
+    btn.style.borderColor = active ? "#111827" : "#e5e7eb";
+  });
+  adminWorkerLocationButtonsBox.querySelectorAll("[data-admin-worktype-location]").forEach(btn => {
+    const active = adminWorkerLocationRegion === btn.getAttribute("data-admin-worktype-location") && adminWorkerLocationOverlays.length;
+    btn.style.background = active ? "#111827" : "#ffffff";
+    btn.style.color = active ? "#ffffff" : "#111827";
+    btn.style.borderColor = active ? "#111827" : "#e5e7eb";
+  });
+}
+
+function removeAdminWorkerLocationButtons() {
+  const old = document.getElementById("kdnAdminRegionButtons");
+  if (old) old.remove();
+  adminWorkerLocationButtonsBox = null;
+}
+
+function renderAdminWorkerLocationButtons() {
+  removeAdminWorkerLocationButtons();
+  if (!isAdminUser()) return;
+
+  const box = document.createElement("div");
+  box.id = "kdnAdminRegionButtons";
+  box.style.position = "fixed";
+  box.style.right = "10px";
+  box.style.bottom = "94px";
+  box.style.zIndex = "13";
+  box.style.display = "flex";
+  box.style.flexDirection = "column";
+  box.style.gap = "6px";
+  box.style.alignItems = "flex-end";
+
+  // 저압/고압은 권역이 없으므로 지도 위에 작업자 위치 확인 버튼 1개만 표시합니다.
+  if (activeWorkType !== "reinforcement") {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "작업자 위치";
+    btn.style.border = "1px solid #e5e7eb";
+    btn.style.borderRadius = "999px";
+    btn.style.background = "#ffffff";
+    btn.style.color = "#111827";
+    btn.style.fontSize = "12px";
+    btn.style.fontWeight = "900";
+    btn.style.padding = "8px 12px";
+    btn.style.boxShadow = "0 4px 14px rgba(0,0,0,0.14)";
+    btn.style.cursor = "pointer";
+    btn.setAttribute("data-admin-worktype-location", activeWorkType);
+    btn.onclick = () => toggleActiveWorkTypeWorkerLocations();
+    box.appendChild(btn);
+    document.body.appendChild(box);
+    adminWorkerLocationButtonsBox = box;
+    return;
+  }
+
+  Object.keys(REGION_BRANCHES).forEach(region => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.setAttribute("data-admin-map-region", region);
+    btn.textContent = region;
+    btn.style.border = "1px solid #e5e7eb";
+    btn.style.borderRadius = "999px";
+    btn.style.background = "#ffffff";
+    btn.style.color = "#111827";
+    btn.style.fontSize = "12px";
+    btn.style.fontWeight = "900";
+    btn.style.padding = "7px 10px";
+    btn.style.boxShadow = "0 4px 14px rgba(0,0,0,0.14)";
+    btn.style.cursor = "pointer";
+    btn.onclick = () => toggleAdminWorkerRegion(region);
+    box.appendChild(btn);
+  });
+
+  document.body.appendChild(box);
+  adminWorkerLocationButtonsBox = box;
+  updateAdminRegionButtonState();
+}
+
+
+
+function clearMarkers() {
+  markers.forEach(m => m.setMap(null));
+  markers = [];
+  markerMap.clear();
+  clearLatestUpdateLabel();
+}
+function inBounds(g, bounds) {
+  return g.y >= bounds.minLat && g.y <= bounds.maxLat && g.x >= bounds.minLng && g.x <= bounds.maxLng;
+}
+function getPlainBounds() {
+  const b = map.getBounds();
+  const sw = b.getSouthWest();
+  const ne = b.getNorthEast();
+  return { minLat: sw.getLat(), maxLat: ne.getLat(), minLng: sw.getLng(), maxLng: ne.getLng() };
+}
+function intersects(a, b) {
+  return !(a.maxLat < b.minLat || a.minLat > b.maxLat || a.maxLng < b.minLng || a.minLng > b.maxLng);
+}
+
+// Zero is an Excel missing-coordinate placeholder in this Korea field-work map.
+function isUsableMapCoordinate(lat, lng) {
+  return typeof lat === "number" && typeof lng === "number" &&
+    Number.isFinite(lat) && Number.isFinite(lng) && lat !== 0 && lng !== 0 &&
+    lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180;
+}
+
+function getSafeAreaBounds(branchNames) {
+  const selected = new Set(branchNames);
+  let result = null;
+  const add = (lat, lng) => {
+    if (!isUsableMapCoordinate(lat, lng)) return;
+    if (!result) result = { minLat: lat, maxLat: lat, minLng: lng, maxLng: lng };
+    else {
+      result.minLat = Math.min(result.minLat, lat);
+      result.maxLat = Math.max(result.maxLat, lat);
+      result.minLng = Math.min(result.minLng, lng);
+      result.maxLng = Math.max(result.maxLng, lng);
+    }
+  };
+  // Rebuild from loaded meter locations so an old branches.json containing 0 cannot move the map.
+  for (const group of groups) {
+    if (canAccessGroup(group) && getGroupBranches(group).some(name => selected.has(name))) {
+      add(group.y, group.x);
+    }
+  }
+  if (result) return result;
+  for (const branch of branchMeta) {
+    if (!selected.has(branch.name)) continue;
+    if (isUsableMapCoordinate(branch.minLat, branch.minLng) &&
+        isUsableMapCoordinate(branch.maxLat, branch.maxLng) &&
+        branch.minLat <= branch.maxLat && branch.minLng <= branch.maxLng) {
+      add(branch.minLat, branch.minLng);
+      add(branch.maxLat, branch.maxLng);
+    } else {
+      // Legacy index may still have a valid median center even if its extent is invalid.
+      add(branch.lat, branch.lng);
+    }
+  }
+  return result;
+}
+
+function mergeLoadedGroup(incoming) {
+  if (!incoming?.n || !Array.isArray(incoming.rows) ||
+      !isUsableMapCoordinate(incoming.y, incoming.x)) return;
+  const fragmented = incoming.rowOffset !== undefined || incoming.rowTotal !== undefined;
+  if (fragmented && (!Number.isSafeInteger(incoming.rowOffset) || incoming.rowOffset < 0 ||
+      !Number.isSafeInteger(incoming.rowTotal) || incoming.rowTotal < incoming.rowOffset + incoming.rows.length)) {
+    throw new Error("분할된 계기 데이터의 행 위치가 올바르지 않습니다.");
+  }
+
+  let target = groupMap.get(incoming.n);
+  if (!target) {
+    if (fragmented) {
+      const { rowOffset, rowTotal, ...base } = incoming;
+      target = { ...base, rows: new Array(rowTotal) };
+    } else {
+      target = incoming;
+    }
+    groups.push(target);
+    groupMap.set(target.n, target);
+    groupIndexDirty = true;
+  }
+  if (fragmented) {
+    // 조각이 거꾸로 도착하거나 재요청되어도 원래 행 인덱스와 기존 객체를 보존합니다.
+    incoming.rows.forEach((row, index) => {
+      const position = incoming.rowOffset + index;
+      if (target.rows[position] === undefined) {
+        target.rows[position] = row;
+        groupIndexDirty = true;
+      }
+    });
+  }
+}
+
+async function loadTiles(files) {
+  const uniqueFiles = [...new Set(files || [])];
+  const requestType = activeWorkType;
+  const requestLoaded = loadedTiles;
+  const requestLoading = loadingTiles;
+  const isCurrentRequest = () => activeWorkType === requestType && loadedTiles === requestLoaded;
+
+  for (const file of uniqueFiles) {
+    if (!isCurrentRequest()) return;
+    if (requestLoaded.has(file)) continue;
+
+    if (!requestLoading.has(file)) {
+      const loadPromise = fetchJsonFresh(resolveDataFile(file))
+        .then(d => {
+          if (!isCurrentRequest()) return;
+          (Array.isArray(d) ? d : []).forEach(mergeLoadedGroup);
+          requestLoaded.set(file, true);
+        })
+        .finally(() => {
+          requestLoading.delete(file);
+        });
+
+      requestLoading.set(file, loadPromise);
+    }
+
+    await requestLoading.get(file);
+  }
+
+  if (isCurrentRequest() && groupIndexDirty) rebuildGroupMap();
+}
+function rebuildGroupMap() {
+  groupIndexDirty = false;
+  const deduped = new Map();
+  for (const g of groups) {
+    if (!g || !g.n) continue;
+    if (!deduped.has(g.n)) deduped.set(g.n, g);
+  }
+  groupMap = deduped;
+  groups = Array.from(groupMap.values());
+  rowGroupMap = new Map();
+  groups.forEach(group => (group.rows || []).forEach((row, idx) => {
+    rowGroupMap.set(getStableRowKey(group.n, idx, row), group.n);
+  }));
+}
+async function loadVisibleTiles() {
+  const bounds = getPlainBounds();
+  const files = tileMeta.filter(t => intersects(t, bounds)).map(t => t.file);
+  await loadTiles(files);
+}
+async function loadAllTiles() {
+  await loadTiles(tileMeta.map(t => t.file));
+}
+
+function getGroupSearchText(group) {
+  const rowText = getVisibleRowEntries(group).flatMap(({ row: r, index }) => [
+    r.inflowNo || "", r.inflowName || "", r.n2 || "", r.o || "", r.f || "", r.r || "",
+    r.h || "", r.i || "", r.j || "", r.c || "", r.m || "", r.applicant || "",
+    r.applicantPhone || "", r.contractPower ?? "", r.purpose || "", r.customerName || "", r.customerPhone1 || "", r.customerPhone2 || "",
+    r.meterReader || "", r.meterReaderPhone || "", r.request || "", r.modemMac || "",
+    getRowStatus(group.n, index, r) || ""
+  ]);
+  return [...getGroupBranches(group), group.n || "", isAssignmentRestricted() ? "" : (group.b || ""),
+    ...rowText].join(" ").toLowerCase();
+}
+
+function filterGroups() {
+  const selectedStatuses = getSelectedValues("statusFilterCheck");
+  const query = (appliedSearchQuery || "").trim().toLowerCase();
+  const bounds = getPlainBounds();
+
+  let source = groups.filter(canAccessGroup);
+  const filteredArea = hasActiveBranchFilter() || hasActiveRegionFilter();
+  const allStatus = !selectedStatuses.length || selectedStatuses.includes("all");
+
+  if (!filteredArea) {
+    if (activeWorkType === "reinforcement" && !query && map.getLevel() > MIN_LEVEL_ALL) return [];
+    if (!query) {
+      source = source.filter(g => inBounds(g, bounds));
+    }
+  } else {
+    source = filterByRegionAndBranch(source);
+  }
+
+  if (!allStatus) {
+    source = source.filter(g => selectedStatuses.includes(getGroupColor(g)));
+  }
+
+  if (query) {
+    source = source.filter(g => getGroupSearchText(g).includes(query));
+  }
+
+  const limit = filteredArea ? MAX_MARKERS_BRANCH : MAX_MARKERS_ALL;
+  return source.slice(0, limit);
+}
+
+
+function getMeterCountBaseGroups() {
+  const query = (appliedSearchQuery || "").trim().toLowerCase();
+
+  let source = groups.filter(canAccessGroup);
+
+  if (hasActiveBranchFilter() || hasActiveRegionFilter()) {
+    source = filterByRegionAndBranch(source);
+  }
+
+  if (query) {
+    source = source.filter(g => getGroupSearchText(g).includes(query));
+  }
+
+  return source;
+}
+
+function drawMarkers(items) {
+  clearLatestUpdateLabel();
+  const visibleItems = [];
+  const drawnGroupNos = new Set();
+
+  for (const g of items) {
+    if (!canAccessGroup(g) || drawnGroupNos.has(g.n)) continue;
+    drawnGroupNos.add(g.n);
+    const color = getGroupColor(g);
+    if (!color) continue;
+
+    let marker = markerMap.get(g.n);
+    if (!marker) {
+      const groupNo = g.n;
+      marker = new kakao.maps.Marker({
+        position: new kakao.maps.LatLng(g.y, g.x),
+        image: getGroupMarkerImage(g, color),
+        clickable: true,
+        zIndex: g.n === selectedMarkerGroupNo ? 10000 : 0
+      });
+      kakao.maps.event.addListener(marker, "click", function () {
+        const current = groupMap.get(groupNo);
+        if (!current || !canAccessGroup(current)) return;
+        selectedMarkerGroupNo = groupNo;
+        refreshMarkerSelection();
+        renderInfo(current);
+      });
+      marker.setMap(map);
+      markerMap.set(g.n, marker);
+    } else {
+      const position = marker.getPosition();
+      if (position.getLat() !== g.y || position.getLng() !== g.x) {
+        marker.setPosition(new kakao.maps.LatLng(g.y, g.x));
+      }
+      updateMarkerAppearance(marker, g, color);
+    }
+    visibleItems.push(g);
+  }
+
+  const retained = new Set(visibleItems.map(g => g.n));
+  markerMap.forEach((marker, groupNo) => {
+    if (!retained.has(groupNo)) {
+      marker.setMap(null);
+      markerMap.delete(groupNo);
+    }
+  });
+  markers = visibleItems.map(g => markerMap.get(g.n));
+  updateMarkerCount(visibleItems, getMeterCountBaseGroups());
+  updateStatusSummary(visibleItems);
+
+  if (currentGroupNo) {
+    const found = visibleItems.find(g => g.n === currentGroupNo);
+    if (found) renderInfo(found);
+    else closeInfo();
+  }
+}
+
+async function refresh() {
+  const generation = ++refreshGeneration;
+  const dataset = loadedTiles;
+  const selectedStatuses = getSelectedValues("statusFilterCheck");
+  const query = (appliedSearchQuery || "").trim();
+  const filteredArea = hasActiveBranchFilter() || hasActiveRegionFilter();
+  const filteredStatus = selectedStatuses.length && !selectedStatuses.includes("all");
+
+  if (activeWorkType !== "reinforcement" || query || filteredStatus || filteredArea) {
+    await loadAllTiles();
+  } else {
+    await loadVisibleTiles();
+  }
+
+  // A newer filter/part/snapshot request owns the final display.
+  if (generation !== refreshGeneration || dataset !== loadedTiles) return;
+  drawMarkers(filterGroups());
+}
+
+async function onAreaFilterChange() {
+  closeInfo();
+  const query = (appliedSearchQuery || "").trim();
+  const targetBranchNames = getActiveMapBranches();
+
+  if (!targetBranchNames.length && !query) {
+    map.setCenter(new kakao.maps.LatLng(DEFAULT_CENTER.lat, DEFAULT_CENTER.lng));
+    map.setLevel(DEFAULT_LEVEL);
+    await refresh();
+    return;
+  }
+
+  await loadAllTiles();
+  if (targetBranchNames.length) {
+    const area = getSafeAreaBounds(targetBranchNames);
+    if (!area) {
+      map.setCenter(new kakao.maps.LatLng(DEFAULT_CENTER.lat, DEFAULT_CENTER.lng));
+      map.setLevel(DEFAULT_LEVEL);
+    } else if (area.minLat === area.maxLat && area.minLng === area.maxLng) {
+      map.setCenter(new kakao.maps.LatLng(area.minLat, area.minLng));
+      map.setLevel(5);
+    } else {
+      map.setBounds(new kakao.maps.LatLngBounds(
+        new kakao.maps.LatLng(area.minLat, area.minLng),
+        new kakao.maps.LatLng(area.maxLat, area.maxLng)
+      ));
+    }
+  }
+
+  await refresh();
+}
+
+async function onBranchChange() {
+  await onAreaFilterChange();
+}
+
+
+function init() {
+  ensureInfoPanel();
+
+  map = new kakao.maps.Map(document.getElementById("map"), {
+    center: new kakao.maps.LatLng(DEFAULT_CENTER.lat, DEFAULT_CENTER.lng),
+    level: DEFAULT_LEVEL
+  });
+
+  Promise.all([
+    fetchJsonFresh(resolveDataFile("tiles_index.json")),
+    fetchJsonFresh(resolveDataFile("branches.json")).catch(() => [])
+  ]).then(([tileData, branchData]) => {
+    tileMeta = tileData.tiles || [];
+    branchMeta = Array.isArray(branchData) ? branchData : [];
+    ensureUI();
+    initAuthSync();
+    refresh();
+  });
+
+  kakao.maps.event.addListener(map, "idle", debounce(refresh, 120));
+}
+
+init();
