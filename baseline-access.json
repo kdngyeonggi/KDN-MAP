@@ -1,0 +1,888 @@
+{
+ "권인": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "3권역"
+  ],
+  "blocked": false
+ },
+ "권택": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "4권역"
+  ],
+  "blocked": false
+ },
+ "김경민": {
+  "role": "worker",
+  "parts": [
+   "high_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "김광신": {
+  "role": "worker",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "김남호": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "5권역"
+  ],
+  "blocked": false
+ },
+ "김동희": {
+  "role": "worker",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "김민찬": {
+  "role": "worker",
+  "parts": [
+   "high_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "김승원": {
+  "role": "worker",
+  "parts": [
+   "high_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "김영준": {
+  "role": "worker",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "김우진": {
+  "role": "admin",
+  "parts": [
+   "reinforcement",
+   "low_voltage",
+   "high_voltage",
+   "relay_table"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "김원식": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "3권역"
+  ],
+  "blocked": false
+ },
+ "김정권": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "1권역"
+  ],
+  "blocked": false
+ },
+ "김종호": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "3권역"
+  ],
+  "blocked": false
+ },
+ "김준석": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "1권역"
+  ],
+  "blocked": false
+ },
+ "김진우": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "5권역"
+  ],
+  "blocked": false
+ },
+ "김창헌": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "3권역"
+  ],
+  "blocked": false
+ },
+ "김태득": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "5권역"
+  ],
+  "blocked": false
+ },
+ "마경태": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "5권역"
+  ],
+  "blocked": false
+ },
+ "문준엽": {
+  "role": "admin",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "민철기": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "5권역"
+  ],
+  "blocked": false
+ },
+ "박많이": {
+  "role": "worker",
+  "parts": [
+   "high_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "박상민": {
+  "role": "worker",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "박성재": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "5권역"
+  ],
+  "blocked": false
+ },
+ "박영순": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "4권역"
+  ],
+  "blocked": false
+ },
+ "박원성": {
+  "role": "worker",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "박인동": {
+  "role": "worker",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "박지나": {
+  "role": "admin",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "박한결": {
+  "role": "admin",
+  "parts": [
+   "high_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "박현창": {
+  "role": "worker",
+  "parts": [
+   "high_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "박홍진": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "4권역"
+  ],
+  "blocked": false
+ },
+ "박효철": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "3권역"
+  ],
+  "blocked": false
+ },
+ "배성호": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "5권역"
+  ],
+  "blocked": false
+ },
+ "서준호": {
+  "role": "worker",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "선경영": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "5권역"
+  ],
+  "blocked": false
+ },
+ "송민우": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "4권역"
+  ],
+  "blocked": false
+ },
+ "송종민": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "5권역"
+  ],
+  "blocked": false
+ },
+ "안경진": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "3권역"
+  ],
+  "blocked": false
+ },
+ "안시영": {
+  "role": "worker",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": true
+ },
+ "안정일": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "4권역"
+  ],
+  "blocked": false
+ },
+ "양낙연": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "3권역"
+  ],
+  "blocked": false
+ },
+ "어인신": {
+  "role": "admin",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "오원식": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "3권역"
+  ],
+  "blocked": false
+ },
+ "원기연": {
+  "role": "worker",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": true
+ },
+ "원유진": {
+  "role": "worker",
+  "parts": [
+   "high_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "원후선": {
+  "role": "worker",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "유병걸": {
+  "role": "admin",
+  "parts": [
+   "reinforcement",
+   "low_voltage",
+   "high_voltage",
+   "relay_table"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "유상욱": {
+  "role": "worker",
+  "parts": [
+   "high_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "유선길": {
+  "role": "admin",
+  "parts": [
+   "reinforcement",
+   "low_voltage",
+   "high_voltage",
+   "relay_table"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "유창욱": {
+  "role": "worker",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "윤인수": {
+  "role": "worker",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "윤재혁": {
+  "role": "worker",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "이길선": {
+  "role": "worker",
+  "parts": [
+   "high_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "이덕용": {
+  "role": "admin",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "이동일": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "4권역"
+  ],
+  "blocked": false
+ },
+ "이명희": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "4권역"
+  ],
+  "blocked": false
+ },
+ "이성범": {
+  "role": "admin",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "이성찬": {
+  "role": "worker",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "이승종": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "3권역"
+  ],
+  "blocked": false
+ },
+ "이은엽": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "1권역"
+  ],
+  "blocked": false
+ },
+ "이재학": {
+  "role": "worker",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "이정훈": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "1권역"
+  ],
+  "blocked": false
+ },
+ "이종우": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "1권역"
+  ],
+  "blocked": false
+ },
+ "이종현": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "4권역"
+  ],
+  "blocked": false
+ },
+ "이주호": {
+  "role": "worker",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "이준기": {
+  "role": "worker",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "이준영": {
+  "role": "worker",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "이창기": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "3권역"
+  ],
+  "blocked": false
+ },
+ "이철규": {
+  "role": "worker",
+  "parts": [
+   "relay_table"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "이철희": {
+  "role": "worker",
+  "parts": [
+   "high_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "이충현": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "3권역"
+  ],
+  "blocked": false
+ },
+ "이혁수": {
+  "role": "worker",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "임정열": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "3권역"
+  ],
+  "blocked": false
+ },
+ "임정우": {
+  "role": "worker",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "임진기": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "3권역"
+  ],
+  "blocked": false
+ },
+ "장기선": {
+  "role": "admin",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "장대희": {
+  "role": "worker",
+  "parts": [
+   "high_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "장현봉": {
+  "role": "worker",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "정재경": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "3권역"
+  ],
+  "blocked": false
+ },
+ "정현철": {
+  "role": "worker",
+  "parts": [
+   "high_voltage"
+  ],
+  "regions": [],
+  "blocked": true
+ },
+ "조규재": {
+  "role": "worker",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "주성진": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "5권역"
+  ],
+  "blocked": false
+ },
+ "채수철": {
+  "role": "admin",
+  "parts": [
+   "reinforcement",
+   "low_voltage",
+   "high_voltage",
+   "relay_table"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "최길준": {
+  "role": "worker",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "최윤재": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "1권역"
+  ],
+  "blocked": false
+ },
+ "최인식": {
+  "role": "worker",
+  "parts": [
+   "high_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "최창원": {
+  "role": "worker",
+  "parts": [
+   "high_voltage"
+  ],
+  "regions": [],
+  "blocked": true
+ },
+ "최현도": {
+  "role": "worker",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "최호균": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "3권역"
+  ],
+  "blocked": false
+ },
+ "최환묵": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "5권역"
+  ],
+  "blocked": false
+ },
+ "한국현": {
+  "role": "worker",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "한상민": {
+  "role": "worker",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "한현우": {
+  "role": "worker",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "허경민": {
+  "role": "admin",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "홍경진": {
+  "role": "worker",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "홍승표": {
+  "role": "admin",
+  "parts": [
+   "high_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "홍은철": {
+  "role": "worker",
+  "parts": [
+   "high_voltage"
+  ],
+  "regions": [],
+  "blocked": true
+ },
+ "홍종우": {
+  "role": "worker",
+  "parts": [
+   "low_voltage"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "홍창수": {
+  "role": "admin",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [],
+  "blocked": false
+ },
+ "황영돈": {
+  "role": "worker",
+  "parts": [
+   "reinforcement"
+  ],
+  "regions": [
+   "3권역"
+  ],
+  "blocked": false
+ }
+}

@@ -15,5 +15,7 @@ function normalizeRestrictedAccountId(value) {
 
 export function isTemporarilyRestrictedUser(value) {
   const userId = normalizeRestrictedAccountId(value);
+  const me=globalThis.KDN_CONTEXT?.me;
+  if(me && me.name===userId) return !!me.blocked;
   return TEMPORARILY_RESTRICTED_USERS.includes(userId);
 }

@@ -34,7 +34,8 @@
     </section>
   </main>
   <script type="module">
-    import { RESTRICTED_ACCOUNT_MESSAGE, isTemporarilyRestrictedUser } from "./account-access.js?v=account-access-v44-20261030";
+    import { API_BASE } from "./portal-config.js?v=47";
+    import { RESTRICTED_ACCOUNT_MESSAGE, isTemporarilyRestrictedUser } from "./account-access.js?v=admin-portal-v46";
     import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
     import {
       getAuth,
@@ -57,7 +58,7 @@
     const auth = getAuth(app);
 
     const params = new URLSearchParams(window.location.search);
-    const next = params.get("next") || "index.html";
+    const next = "index.html";
 
     const loginIdEl = document.getElementById("loginId");
     const passwordEl = document.getElementById("password");
@@ -100,7 +101,7 @@
       const password = passwordEl.value;
       errorEl.style.display = "none";
 
-      if (isTemporarilyRestrictedUser(loginId)) {
+      if (!API_BASE && isTemporarilyRestrictedUser(loginId)) {
         showError(RESTRICTED_ACCOUNT_MESSAGE);
         return;
       }
@@ -115,7 +116,7 @@
 
       try {
         const credential = await signInWithEmailAndPassword(auth, normalizeLoginId(loginId), password);
-        if (isTemporarilyRestrictedUser(credential.user.email || "")) {
+        if (!API_BASE && isTemporarilyRestrictedUser(credential.user.email || "")) {
           await rejectRestrictedSession();
           return;
         }
@@ -142,7 +143,7 @@
 
     onAuthStateChanged(auth, (user) => {
       if (!user) return;
-      if (isTemporarilyRestrictedUser(user.email || "")) {
+      if (!API_BASE && isTemporarilyRestrictedUser(user.email || "")) {
         rejectRestrictedSession();
         return;
       }

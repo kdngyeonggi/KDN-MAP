@@ -1,0 +1,9 @@
+KDN MAP browser-side Excel conversion runtime
+Pyodide 0.27.7 (MPL-2.0): https://github.com/pyodide/pyodide/tree/0.27.7 .
+Unmodified distribution files: https://registry.npmjs.org/pyodide/-/pyodide-0.27.7.tgz .
+Hashlib and OpenSSL libraries are from the corresponding official Pyodide release, checked against its lockfile.
+CPython 3.12.7: https://github.com/python/cpython/tree/v3.12.7 .
+Emscripten 3.1.58: https://github.com/emscripten-core/emscripten/tree/3.1.58 .
+OpenSSL 1.1.1w: https://github.com/openssl/openssl/tree/OpenSSL_1_1_1w .
+See accompanying license files. The unmodified openpyxl 3.1.5, et_xmlfile 2.0.0 and defusedxml 0.7.1 wheels from PyPI include their respective licenses.
+The KDN MAP converter is loaded only for a local workbook; the packaged runtime is served from the same site.

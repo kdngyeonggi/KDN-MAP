@@ -1,4 +1,4 @@
-import { RESTRICTED_ACCOUNT_MESSAGE, isTemporarilyRestrictedUser } from "./account-access.js?v=account-access-v44-20261030";
+import { RESTRICTED_ACCOUNT_MESSAGE, isTemporarilyRestrictedUser } from "./account-access.js?v=admin-portal-v46";
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
 import {
   getAuth,
@@ -214,7 +214,7 @@ const FULL_SCOPE_ADMINS = [
   "김우진", "유병걸", "채수철", "유선길"
 ];
 
-let activeWorkType = "reinforcement";
+let activeWorkType = window.KDN_CONTEXT?.me?.parts?.[0] || "reinforcement";
 
 // 저압과 중계표의 마커, 필터, 상태 선택을 같은 기준으로 표시합니다.
 function usesLowVoltageStatuses(type = activeWorkType) {
@@ -278,6 +278,8 @@ function getWorkTypeLabel(type = activeWorkType) {
 }
 
 function getUserAssignedWorkType(userId = getCurrentUserId()) {
+  const me=window.KDN_CONTEXT?.me;
+  if (me && userId===me.name) return me.parts.includes(activeWorkType) ? activeWorkType : me.parts[0];
   if (FULL_SCOPE_ADMINS.includes(userId)) return activeWorkType;
   if (LOW_VOLTAGE_ADMINS.includes(userId) || LOW_VOLTAGE_WORKERS.includes(userId)) return "low_voltage";
   if (HIGH_VOLTAGE_ADMINS.includes(userId) || HIGH_VOLTAGE_WORKERS.includes(userId)) return "high_voltage";
@@ -286,6 +288,8 @@ function getUserAssignedWorkType(userId = getCurrentUserId()) {
 }
 
 function isWorkTypeAdmin(userId = getCurrentUserId(), type = activeWorkType) {
+  const me=window.KDN_CONTEXT?.me;
+  if (me && userId===me.name) return me.role==="admin" && me.parts.includes(type);
   if (FULL_SCOPE_ADMINS.includes(userId)) return true;
   if (type === "reinforcement") return REINFORCEMENT_ADMINS.includes(userId);
   if (type === "low_voltage") return LOW_VOLTAGE_ADMINS.includes(userId);
@@ -294,11 +298,15 @@ function isWorkTypeAdmin(userId = getCurrentUserId(), type = activeWorkType) {
 }
 
 function canAccessWorkType(type, userId = getCurrentUserId()) {
+  const me=window.KDN_CONTEXT?.me;
+  if (me && userId===me.name) return !me.blocked && me.parts.includes(type);
   return !!userId && !isTemporarilyRestrictedUser(userId) && !!WORK_TYPES[type] &&
     (FULL_SCOPE_ADMINS.includes(userId) || getUserAssignedWorkType(userId) === type);
 }
 
 function getWorkersForActiveWorkType() {
+  const roster=window.KDN_CONTEXT?.roster;
+  if (roster) return roster.filter(r=>!r.blocked && r.parts.includes(activeWorkType)).map(r=>r.name);
   if (activeWorkType === "low_voltage") return LOW_VOLTAGE_WORKERS.slice();
   if (activeWorkType === "high_voltage") return HIGH_VOLTAGE_WORKERS.slice();
   if (activeWorkType === "relay_table") return RELAY_TABLE_WORKERS.slice();
@@ -609,6 +617,8 @@ function getCurrentUserId() {
 }
 
 function getUserPermission(email) {
+  const me=window.KDN_CONTEXT?.me;
+  if (me && getLoginUserId(email)===me.name) return {role:me.role,regions:me.regions};
   const userId = getLoginUserId(email);
   if (FULL_SCOPE_ADMINS.includes(userId)) {
     return { role: "admin", regions: [] };
@@ -1314,6 +1324,7 @@ function initAuthSync() {
 
   let restrictionRedirectPending = false;
   onAuthStateChanged(auth, (user) => {
+    if (user && window.KDN_CONTEXT && (user.uid!==window.KDN_CONTEXT.uid || getLoginUserId(user.email)!==window.KDN_CONTEXT.me.name)) { window.location.replace("index.html"); return; }
     if (user) restrictionRedirectPending = isTemporarilyRestrictedUser(user.email || "");
     currentUser = restrictionRedirectPending ? null : user;
 
@@ -1341,7 +1352,7 @@ function initAuthSync() {
     }
 
     currentPermission = getUserPermission(user.email || "");
-    const desiredWorkType = FULL_SCOPE_ADMINS.includes(getCurrentUserId()) ? "reinforcement" : getUserAssignedWorkType(getCurrentUserId());
+    const desiredWorkType = getUserAssignedWorkType(getCurrentUserId());
     const workTypeChangedAfterLogin = activeWorkType !== desiredWorkType;
     activeWorkType = desiredWorkType;
     hideAuthPanel();
@@ -1398,6 +1409,7 @@ function renderLoginStatus() {
     <button id="kdnLogoutBtn" type="button" style="border:none;background:#111827;color:#fff;border-radius:999px;padding:4px 7px;font-size:11px;cursor:pointer;">로그아웃</button>
   `;
   document.body.appendChild(box);
+  if (isAdminUser()) { const back=document.createElement("button");back.type="button";back.textContent="관리자 메뉴";back.style.cssText="border:0;border-radius:20px;padding:5px 9px;background:#fee500;font-weight:750;cursor:pointer";back.onclick=()=>location.assign("index.html");box.querySelector("#kdnLogoutBtn").before(back); }
   box.querySelector("#kdnLogoutBtn").onclick = () => { stopInactivityLogout(); signOut(auth); };
 }
 
@@ -1618,6 +1630,8 @@ function createWorkExcelZip(files) {
 }
 
 function getWorkersByRegion() {
+  const roster=window.KDN_CONTEXT?.roster;
+  if (roster) return Object.fromEntries(Object.keys(REGION_BRANCHES).map(r=>[r,roster.filter(w=>!w.blocked && w.parts.includes("reinforcement") && w.regions.includes(r)).map(w=>w.name)]));
   const result = {};
   Object.keys(REGION_BRANCHES).forEach(region => result[region] = []);
 
@@ -2707,14 +2721,15 @@ function updateWorkTypeUIVisibility() {
 function renderWorkTypeSwitcher() {
   const old = document.getElementById("kdnWorkTypeSwitcher");
   if (old) old.remove();
-  if (!FULL_SCOPE_ADMINS.includes(getCurrentUserId())) return null;
+  const allowedTypes=Object.keys(WORK_TYPES).filter(t=>canAccessWorkType(t));
+  if (allowedTypes.length<2) return null;
 
   const row = document.createElement("div");
   row.id = "kdnWorkTypeSwitcher";
   row.className = "kdn-row";
   row.style.gap = "5px";
 
-  Object.entries(WORK_TYPES).forEach(([type, info]) => {
+  Object.entries(WORK_TYPES).filter(([type])=>allowedTypes.includes(type)).forEach(([type, info]) => {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.textContent = info.label;
