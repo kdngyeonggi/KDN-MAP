@@ -16,8 +16,6 @@ import {
   onSnapshot,
   setDoc,
   addDoc,
-  getDocs,
-  writeBatch,
   serverTimestamp
 } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
 
@@ -638,7 +636,10 @@ function isAdminUser() {
 }
 
 function canViewFirebaseAdminTab() {
-  return getCurrentUserId() === "김우진";
+  const ctx=window.KDN_CONTEXT, me=ctx?.me;
+  return !!(currentUser && ctx?.uid===currentUser.uid && me?.name===getCurrentUserId() &&
+    me.role==="admin" && !me.blocked && me.parts?.includes(activeWorkType) &&
+    me.capabilities?.includes("reset") && typeof ctx.resetStatusPage==="function");
 }
 
 function getAllowedRegionNames() {
@@ -1796,42 +1797,9 @@ function renderFirebaseResetProgress() {
     if (firebaseResetBusy) button.textContent = firebaseResetProgress;
   });
 }
-function selectResetDocuments(documents, targetWorkType) {
-  return documents.filter(snapshot => {
-    const data = snapshot.data() || {};
-    return String(data.workType || "reinforcement") === targetWorkType &&
-      data.kind !== "markerMemo" && !String(data.key || "").startsWith("markerMemo|");
-  });
-}
-async function deleteResetDocuments(documents, onProgress) {
-  let deleted = 0;
-  async function commitChunk(chunk) {
-    const batch = writeBatch(db);
-    chunk.forEach(snapshot => batch.delete(snapshot.ref));
-    try {
-      await batch.commit();
-    } catch (error) {
-      // Rules may use per-document lookups: retry smaller atomic batches.
-      if (chunk.length > 1 && /permission-denied|resource-exhausted/.test(String(error.code))) {
-        const middle = Math.ceil(chunk.length / 2);
-        await commitChunk(chunk.slice(0, middle));
-        await commitChunk(chunk.slice(middle));
-        return;
-      }
-      throw error;
-    }
-    deleted += chunk.length;
-    onProgress(deleted, documents.length);
-    await new Promise(resolve => setTimeout(resolve, 0));
-  }
-  for (let offset = 0; offset < documents.length; offset += 200) {
-    await commitChunk(documents.slice(offset, offset + 200));
-  }
-  return deleted;
-}
 async function resetFirebaseOverridesFromAdmin(targetWorkType = activeWorkType) {
   if (!isAdminUser() || !canViewFirebaseAdminTab()) {
-    alert("김우진 관리자만 초기화할 수 있습니다.");
+    alert("현재 파트의 Firebase 초기화 권한이 없습니다.");
     return;
   }
   if (!WORK_TYPES[targetWorkType] || targetWorkType !== activeWorkType) {
@@ -1841,31 +1809,33 @@ async function resetFirebaseOverridesFromAdmin(targetWorkType = activeWorkType) 
   if (firebaseResetBusy) return;
   const workLabel = getWorkTypeLabel(targetWorkType);
   if (!confirm(`${workLabel} Firebase 변경값을 초기화할까요?\n\n` +
-    "선택한 작업 종류의 statusOverrides 상태 변경값만 삭제됩니다.\n" +
+    "선택한 파트의 작업 상태 변경값만 삭제합니다.\n" +
     "화면은 해당 작업의 최신 JSON 기준 상태로 돌아갑니다. 메모는 유지됩니다.\n\n" +
     "이 작업은 되돌릴 수 없습니다.")) return;
   if (!confirm(`정말로 ${workLabel} 변경값만 초기화하시겠습니까?`)) return;
   firebaseResetBusy = true;
   firebaseResetProgress = "초기화 대상 확인 중…";
   renderFirebaseResetProgress();
-  let deletedCount = 0;
+  let deletedCount = 0, newerCount = 0, cursor = null;
   try {
-    // Legacy reinforcement records omit workType; retain collection scan for compatibility.
-    const ref = targetWorkType === "reinforcement"
-      ? collection(db, "statusOverrides")
-      : query(collection(db, "statusOverrides"), where("workType", "==", targetWorkType));
-    const snapshot = await getDocs(ref);
-    const documents = selectResetDocuments(snapshot.docs, targetWorkType);
-    await deleteResetDocuments(documents, (done, total) => {
-      deletedCount = done;
-      firebaseResetProgress = `초기화 ${done.toLocaleString()} / ${total.toLocaleString()}건`;
+    do {
+      if (activeWorkType!==targetWorkType || !canViewFirebaseAdminTab()) {
+        throw Error("파트 또는 로그인 권한이 변경되어 중단했습니다.");
+      }
+      const page=await window.KDN_CONTEXT.resetStatusPage(targetWorkType,cursor);
+      if (!Number.isSafeInteger(page?.deleted) || page.deleted<0 || !Number.isSafeInteger(page.newer) ||
+          page.newer<0 || !(page.next===null || (typeof page.next==="string" && page.next && page.next!==cursor))) {
+        throw Error("초기화 응답을 확인할 수 없습니다. 지도를 새로고침하세요.");
+      }
+      deletedCount+=page.deleted; newerCount+=page.newer; cursor=page.next;
+      firebaseResetProgress="초기화 중 · "+deletedCount.toLocaleString()+"건 삭제";
       renderFirebaseResetProgress();
-    });
-    // Keep authoritative snapshot state. Do not erase concurrent new worker changes locally.
-    alert(`${workLabel} Firebase 변경값 초기화 완료\n삭제된 문서: ${deletedCount.toLocaleString()}개`);
+    } while (cursor!==null);
+    alert(workLabel+" Firebase 변경값 초기화 완료\\n삭제된 상태 변경값: "+deletedCount.toLocaleString()+"건"+
+      (newerCount?"\\n초기화 시작 후 변경되어 유지된 기록: "+newerCount.toLocaleString()+"건":""));
   } catch (error) {
-    alert(`초기화 중단: ${deletedCount.toLocaleString()}개 삭제 완료.\n` +
-      "Firebase 권한 또는 네트워크를 확인한 뒤 다시 실행하면 남은 기록을 처리합니다.");
+    alert(workLabel+" 초기화 중단 · 서버 응답으로 확인된 삭제: "+deletedCount.toLocaleString()+"건\\n"+
+      (error?.message||"네트워크 연결을 확인하세요.")+"\\n현재 상태를 확인한 뒤 다시 실행하세요.");
   } finally {
     firebaseResetBusy = false;
     firebaseResetProgress = "";

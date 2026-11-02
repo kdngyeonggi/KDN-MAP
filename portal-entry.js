@@ -1,7 +1,7 @@
 import {API_BASE,FIREBASE_CONFIG,MAP_SDK} from "./portal-config.js?v=47";
 import {initializeApp} from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
 import {getAuth,onAuthStateChanged,signOut} from "https://www.gstatic.com/firebasejs/11.0.0/firebase-auth.js";
-import {mount} from "./portal-ui.js?v=47";
+import {mount} from "./portal-ui.js?v=48";
 const auth=getAuth(initializeApp(FIREBASE_CONFIG)),host=document.querySelector("#portal");
 const idleKey="kdn_last_activity_at_v1",timeout=10800000;let serial=0,uid=null,blocked=false,rechecking=false,stamp="";
 const base=API_BASE.replace(/\/$/,"");
@@ -40,9 +40,13 @@ onAuthStateChanged(auth,async user=>{
    if(me.role==="admin" && new URLSearchParams(location.search).get("view")!=="map"){
      mount(host,{me,api,connected:!!base,baseline:ctx.roster||[],baselineAdmins:ctx.admins||[],logout:()=>logout(),openMap:()=>location.assign("index.html?view=map")});
    }else{
-     if(base&&me.role==="admin")window.KDN_CONTEXT.roster=(await api("/api/workers")).workers;
+     if(base&&me.role==="admin"){
+      window.KDN_CONTEXT.roster=(await api("/api/workers")).workers;
+      if(me.capabilities?.includes("reset"))
+       window.KDN_CONTEXT.resetStatusPage=(part,cursor)=>api("/api/status/reset",{method:"POST",body:{part,cursor}});
+     }
      await mapSdk();if(n!==serial)return;host.hidden=true;document.querySelector("#map").hidden=false;document.body.classList.add("map-screen");
-     await import("./app.js?v=admin-workspace-v47");
+     await import("./app.js?v=admin-workspace-v48");
    }
  }catch(e){if(!blocked)fail(e);}
 });
