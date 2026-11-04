@@ -1,4 +1,4 @@
-import {API_BASE,FIREBASE_CONFIG,MAP_SDK} from "./portal-config.js?v=47";
+import {API_BASE,FIREBASE_CONFIG,MAP_SDK} from "./portal-config.js?v=map-key-v50";
 import {initializeApp} from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
 import {getAuth,onAuthStateChanged,signOut} from "https://www.gstatic.com/firebasejs/11.0.0/firebase-auth.js";
 import {mount} from "./portal-ui.js?v=48";

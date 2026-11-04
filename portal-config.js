@@ -7,6 +7,6 @@ export const FIREBASE_CONFIG = {
   appId: "1:774166998071:web:d99011e3487d86849e23b2",
   measurementId: "G-DE4C2P3GKZ"
 };
-export const MAP_SDK = "https://dapi.kakao.com/v2/maps/sdk.js?appkey=2c8527915b3996a1714ca9b990746de4";
+export const MAP_SDK = "https://dapi.kakao.com/v2/maps/sdk.js?appkey=f40d2128e4f59e7bcc1afa9fee13d910";
 
 export const API_BASE = "https://asia-northeast3-kdn-map.cloudfunctions.net/kdnPortal";
