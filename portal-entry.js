@@ -46,7 +46,7 @@ onAuthStateChanged(auth,async user=>{
        window.KDN_CONTEXT.resetStatusPage=(part,cursor)=>api("/api/status/reset",{method:"POST",body:{part,cursor}});
      }
      await mapSdk();if(n!==serial)return;host.hidden=true;document.querySelector("#map").hidden=false;document.body.classList.add("map-screen");
-     await import("./app.js?v=admin-workspace-v48");
+     await import("./app.js?v=marker-viewport-v49");
    }
  }catch(e){if(!blocked)fail(e);}
 });

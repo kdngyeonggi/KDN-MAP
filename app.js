@@ -162,14 +162,16 @@ let loadedTiles = new Map();
 let loadingTiles = new Map();
 let groupIndexDirty = false;
 let refreshGeneration = 0;
+let markerRenderGeneration = 0;
 let groups = [];
 let markers = [];
 
 const DEFAULT_CENTER = { lat: 37.275, lng: 127.009 };
 const DEFAULT_LEVEL = 9;
 const MIN_LEVEL_ALL = 7;
-const MAX_MARKERS_ALL = 5000;
-const MAX_MARKERS_BRANCH = 12000;
+// Time-slice large views; never truncate a branch or search result by marker count.
+const MARKER_RENDER_BATCH = 200;
+const MARKER_RENDER_BUDGET_MS = 10;
 const STORAGE_KEY = "kdn_status_overrides_v1";
 const MEMO_STORAGE_KEY = "kdn_marker_memos_v1";
 
@@ -3953,9 +3955,12 @@ function renderAdminWorkerLocationButtons() {
 
 
 function clearMarkers() {
-  markers.forEach(m => m.setMap(null));
+  markerRenderGeneration += 1;
+  // markerMap also owns markers from a render that has not finished yet.
+  markerMap.forEach(m => m.setMap(null));
   markers = [];
   markerMap.clear();
+  if (markerCountEl) markerCountEl.removeAttribute("aria-busy");
   clearLatestUpdateLabel();
 }
 function inBounds(g, bounds) {
@@ -4137,8 +4142,7 @@ function filterGroups() {
     source = source.filter(g => getGroupSearchText(g).includes(query));
   }
 
-  const limit = filteredArea ? MAX_MARKERS_BRANCH : MAX_MARKERS_ALL;
-  return source.slice(0, limit);
+  return source;
 }
 
 
@@ -4158,17 +4162,62 @@ function getMeterCountBaseGroups() {
   return source;
 }
 
-function drawMarkers(items) {
+async function drawMarkers(items, refreshId = refreshGeneration, dataset = loadedTiles) {
+  const renderId = ++markerRenderGeneration;
+  const userId = currentUser?.uid;
+  const isCurrent = () => renderId === markerRenderGeneration &&
+    refreshId === refreshGeneration && dataset === loadedTiles && userId === currentUser?.uid;
+  if (!isCurrent()) return;
   clearLatestUpdateLabel();
-  const visibleItems = [];
-  const drawnGroupNos = new Set();
+
+  // Selection/counts cover the complete filtered dataset. Only actual marker objects
+  // are restricted to the viewport, so off-screen rows never consume a display limit.
+  const bounds = getPlainBounds();
+  const matchedItems = [], visibleItems = [], matchedIds = new Set(), colors = new Map();
+  let sliceStarted = performance.now(), steps = 0, painted = 0;
+  const needsPause = () => ++steps >= MARKER_RENDER_BATCH ||
+    performance.now() - sliceStarted >= MARKER_RENDER_BUDGET_MS;
+  const pause = async () => {
+    await new Promise(resolve => setTimeout(resolve, 0));
+    sliceStarted = performance.now(); steps = 0;
+    return isCurrent();
+  };
+  const progress = text => {
+    if (markerCountEl) {
+      markerCountEl.setAttribute("aria-busy", "true");
+      markerCountEl.textContent = text;
+    }
+  };
 
   for (const g of items) {
-    if (!canAccessGroup(g) || drawnGroupNos.has(g.n)) continue;
-    drawnGroupNos.add(g.n);
-    const color = getGroupColor(g);
-    if (!color) continue;
+    if (!isCurrent()) return;
+    if (canAccessGroup(g) && !matchedIds.has(g.n) && isUsableMapCoordinate(g.y, g.x)) {
+      const color = getGroupColor(g);
+      if (color) {
+        matchedIds.add(g.n); matchedItems.push(g);
+        if (inBounds(g, bounds)) { visibleItems.push(g); colors.set(g.n, color); }
+      }
+    }
+    if (needsPause()) {
+      progress("마커 표시 준비 중…");
+      if (!await pause()) return;
+    }
+  }
 
+  // Retire off-screen markers first, keeping the objects for markers that remain visible.
+  const retained = new Set(visibleItems.map(g => g.n));
+  for (const [groupNo, marker] of markerMap) {
+    if (!isCurrent()) return;
+    if (!retained.has(groupNo)) { marker.setMap(null); markerMap.delete(groupNo); }
+    if (needsPause()) {
+      progress("마커 표시 중…");
+      if (!await pause()) return;
+    }
+  }
+
+  for (const g of visibleItems) {
+    if (!isCurrent()) return;
+    const color = colors.get(g.n);
     let marker = markerMap.get(g.n);
     if (!marker) {
       const groupNo = g.n;
@@ -4194,28 +4243,29 @@ function drawMarkers(items) {
       }
       updateMarkerAppearance(marker, g, color);
     }
-    visibleItems.push(g);
+    painted += 1;
+    if (needsPause()) {
+      progress("마커 표시 중 " + painted.toLocaleString() + " / " + visibleItems.length.toLocaleString() + "개");
+      if (!await pause()) return;
+    }
   }
 
-  const retained = new Set(visibleItems.map(g => g.n));
-  markerMap.forEach((marker, groupNo) => {
-    if (!retained.has(groupNo)) {
-      marker.setMap(null);
-      markerMap.delete(groupNo);
-    }
-  });
+  if (!isCurrent()) return;
   markers = visibleItems.map(g => markerMap.get(g.n));
-  updateMarkerCount(visibleItems, getMeterCountBaseGroups());
-  updateStatusSummary(visibleItems);
+  // Panning changes visible marker objects, not the selected branch's total counts.
+  updateMarkerCount(matchedItems, getMeterCountBaseGroups());
+  updateStatusSummary(matchedItems);
+  if (markerCountEl) markerCountEl.removeAttribute("aria-busy");
 
   if (currentGroupNo) {
-    const found = visibleItems.find(g => g.n === currentGroupNo);
+    const found = matchedItems.find(g => g.n === currentGroupNo);
     if (found) renderInfo(found);
     else closeInfo();
   }
 }
 
 async function refresh() {
+  markerRenderGeneration += 1;
   const generation = ++refreshGeneration;
   const dataset = loadedTiles;
   const selectedStatuses = getSelectedValues("statusFilterCheck");
@@ -4231,7 +4281,7 @@ async function refresh() {
 
   // A newer filter/part/snapshot request owns the final display.
   if (generation !== refreshGeneration || dataset !== loadedTiles) return;
-  drawMarkers(filterGroups());
+  await drawMarkers(filterGroups(), generation, dataset);
 }
 
 async function onAreaFilterChange() {
@@ -4290,6 +4340,8 @@ function init() {
     refresh();
   });
 
+  // Stop drawing an obsolete viewport while the user pans or changes zoom.
+  kakao.maps.event.addListener(map, "bounds_changed", () => { markerRenderGeneration += 1; });
   kakao.maps.event.addListener(map, "idle", debounce(refresh, 120));
 }
 
