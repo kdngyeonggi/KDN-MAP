@@ -1,7 +1,7 @@
 import {API_BASE,FIREBASE_CONFIG,MAP_SDK} from "./portal-config.js?v=map-key-v50";
 import {initializeApp} from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
 import {getAuth,onAuthStateChanged,signOut} from "https://www.gstatic.com/firebasejs/11.0.0/firebase-auth.js";
-import {mount} from "./portal-ui.js?v=48";
+import {mount} from "./portal-ui.js?v=work-v51";
 const auth=getAuth(initializeApp(FIREBASE_CONFIG)),host=document.querySelector("#portal");
 const idleKey="kdn_last_activity_at_v1",timeout=10800000;let serial=0,uid=null,blocked=false,rechecking=false,stamp="";
 const base=API_BASE.replace(/\/$/,"");
@@ -38,15 +38,23 @@ onAuthStateChanged(auth,async user=>{
    const me=ctx.me;if(me.blocked){await logout(true);return;}if(!me.parts?.length)throw Error("아직 배정된 파트가 없습니다. 관리자에게 문의하세요.");
    window.KDN_CONTEXT={...ctx,uid:user.uid};stamp=JSON.stringify(me);
    if(me.role==="admin" && new URLSearchParams(location.search).get("view")!=="map"){
-     mount(host,{me,api,connected:!!base,baseline:ctx.roster||[],baselineAdmins:ctx.admins||[],logout:()=>logout(),openMap:()=>location.assign("index.html?view=map")});
+     let recordsPromise;
+     const active=()=>auth.currentUser?.uid===user.uid && window.KDN_CONTEXT?.uid===user.uid && !blocked;
+     const records=()=>recordsPromise || (recordsPromise=import("./admin-records.js?v=51").then(mod=>mod.createRecordService({
+       api,active,authorize:async(part,cap)=>{
+         if(!active() || !me.parts.includes(part))throw Error("담당 파트의 관리자만 조회할 수 있습니다.");
+         const fresh=await api("/api/me");
+         if(!active() || fresh.name!==me.name || fresh.role!=="admin" || fresh.blocked || !fresh.parts?.includes(part) || (cap&&!fresh.capabilities?.includes(cap)))
+           throw Error("현재 계정에 이 파트의 작업 권한이 없습니다.");
+       }
+     })).catch(e=>{recordsPromise=null;throw e;}));
+     mount(host,{me,api,records,connected:!!base,baseline:ctx.roster||[],baselineAdmins:ctx.admins||[],logout:()=>logout(),openMap:()=>location.assign("index.html?view=map")});
    }else{
      if(base&&me.role==="admin"){
       window.KDN_CONTEXT.roster=(await api("/api/workers")).workers;
-      if(me.capabilities?.includes("reset"))
-       window.KDN_CONTEXT.resetStatusPage=(part,cursor)=>api("/api/status/reset",{method:"POST",body:{part,cursor}});
      }
      await mapSdk();if(n!==serial)return;host.hidden=true;document.querySelector("#map").hidden=false;document.body.classList.add("map-screen");
-     await import("./app.js?v=marker-viewport-v49");
+     await import("./app.js?v=work-v51");
    }
  }catch(e){if(!blocked)fail(e);}
 });

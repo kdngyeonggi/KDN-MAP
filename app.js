@@ -1,3 +1,4 @@
+import { stableRowKey, safeDocId, markerMemoKey, displayWorker as getDisplayUserId, formatWorkTime as formatStatusChangeTime } from "./work-keys.js?v=51";
 import { RESTRICTED_ACCOUNT_MESSAGE, isTemporarilyRestrictedUser } from "./account-access.js?v=admin-portal-v46";
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
 import {
@@ -637,13 +638,6 @@ function isAdminUser() {
   return currentPermission && currentPermission.role === "admin" && isWorkTypeAdmin();
 }
 
-function canViewFirebaseAdminTab() {
-  const ctx=window.KDN_CONTEXT, me=ctx?.me;
-  return !!(currentUser && ctx?.uid===currentUser.uid && me?.name===getCurrentUserId() &&
-    me.role==="admin" && !me.blocked && me.parts?.includes(activeWorkType) &&
-    me.capabilities?.includes("reset") && typeof ctx.resetStatusPage==="function");
-}
-
 function getAllowedRegionNames() {
   if (activeWorkType !== "reinforcement") return [];
   if (isAdminUser()) return Object.keys(REGION_BRANCHES);
@@ -737,10 +731,6 @@ let statusOverrides = loadOverrides();
 // 기존 실시간 스냅샷의 변경자/서버 시간을 재사용합니다. 별도 Firestore 조회는 하지 않습니다.
 let statusChangeDetails = {};
 let statusChangeDetailsReady = false;
-let statusExportReady = false;
-let workExportBusy = false;
-let workExportStatus = "";
-let workExportMessage = "";
 let markerMemos = loadMarkerMemos();
 let appliedSearchQuery = "";
 let currentLocationMarker = null;
@@ -752,14 +742,8 @@ let latestUpdatesByUser = new Map();
 let adminWorkerLocationRegion = null;
 let adminWorkerLocationOverlays = [];
 let adminWorkerLocationButtonsBox = null;
-let firebaseSyncState = {
-  status: "연결 전",
-  lastSyncAt: null,
-  docCount: 0,
-  scope: ""
-};
+let firebaseConnected = false;
 let adminDashboardPanel = null;
-let adminDashboardTab = "firebase";
 
 function loadOverrides() {
   try {
@@ -789,20 +773,7 @@ function isFirebaseConfigured() {
   return firebaseConfig.apiKey && !String(firebaseConfig.apiKey).startsWith("YOUR_");
 }
 
-function safeDocId(value) {
-  return encodeURIComponent(String(value || "")).replaceAll(".", "%2E");
-}
-
-function getMarkerMemoDocKey(groupNo) {
-  return `markerMemo|${activeWorkType}|${String(groupNo || "")}`;
-}
-
-function normalizeRowKeyPart(value) {
-  return String(value || "")
-    .trim()
-    .replace(/\s+/g, "")
-    .replace(/[|]/g, "_");
-}
+function getMarkerMemoDocKey(groupNo) { return markerMemoKey(activeWorkType, groupNo); }
 
 function normalizeAddressGroupKey(address, roadAddress = "") {
   // 번지까지를 주소 묶음 기준으로 사용하고, 뒤의 동·호수·상호명은 제외합니다.
@@ -880,23 +851,7 @@ function getGroupBranches(group) {
   return [...new Set(values.map(value => String(value || "").trim()).filter(Boolean))];
 }
 
-function getStableRowKey(groupNo, idx, row = {}) {
-  // 지도 마커의 좌표 ID와 분리하여 기존 계기별 Firebase 문서를 계속 사용합니다.
-  const storageGroupNo = row.statusGroupNo ?? groupNo;
-  const storageRowIndex = row.statusRowIndex ?? idx;
-  const meter = normalizeRowKeyPart(row.m);
-  const contract = normalizeRowKeyPart(row.c);
-  const address = normalizeRowKeyPart(row.f);
-  const transformer = normalizeRowKeyPart(row.n2);
-  const stableParts = [storageGroupNo, meter, contract, address, transformer].map(normalizeRowKeyPart);
-  const baseKey = (meter || contract || address || transformer)
-    ? `v2|${stableParts.join("|")}`
-    : `v2|${normalizeRowKeyPart(storageGroupNo)}|idx:${storageRowIndex}`;
-
-  // 기존 보강공사 Firebase key는 그대로 유지하여 기존 데이터와 100% 호환합니다.
-  if (activeWorkType === "reinforcement") return baseKey;
-  return `${activeWorkType}|${baseKey}`;
-}
+function getStableRowKey(groupNo, idx, row = {}) { return stableRowKey(activeWorkType, groupNo, idx, row); }
 
 function isStableOverrideKey(key) {
   return String(key || "").startsWith("v2|");
@@ -1026,15 +981,11 @@ function getStatusOverrideRefsForCurrentUser() {
   return [query(baseRef, where("workType", "==", activeWorkType))];
 }
 
-function updateFirebaseSyncState(status, docCount) {
-  firebaseSyncState.status = status;
-  firebaseSyncState.lastSyncAt = new Date();
-  firebaseSyncState.docCount = Number(docCount || 0);
-  firebaseSyncState.scope = activeWorkType === "reinforcement"
-    ? (isAdminUser() ? "전체" : getAllowedRegionNames().join(", "))
-    : (isAssignmentRestricted() ? "저압 · 본인 할당 + 미할당" : `${getWorkTypeLabel()} 전체`);
+function updateFirebaseSyncState(status) {
+  firebaseConnected = status === "연결됨" && navigator.onLine !== false;
   renderAdminDashboardContent();
 }
+window.addEventListener("offline", () => updateFirebaseSyncState("연결안됨"));
 
 function formatDateTime(date) {
   if (!date) return "-";
@@ -1115,13 +1066,13 @@ function applyOverrideSnapshotToState(snapshot, next, latestRef, latestByUser, n
   });
 }
 
-function applySyncedOverrideState(next, latest, latestByUser = new Map(), nextMemos = null, nextChanges = {}) {
+function applySyncedOverrideState(next, latest, latestByUser = new Map(), nextMemos = null, nextChanges = {}, connected = false) {
   statusOverrides = next;
   statusChangeDetails = nextChanges;
   statusChangeDetailsReady = true;
   latestUpdatesByUser = latestByUser;
   if (nextMemos) markerMemos = nextMemos;
-  updateFirebaseSyncState("연결됨", Object.keys(next || {}).length);
+  updateFirebaseSyncState(connected ? "연결됨" : "연결안됨");
 
   if (latest && latest.groupNo) {
     latestUpdatedGroupNo = latest.groupNo;
@@ -1144,10 +1095,10 @@ function applySyncedOverrideState(next, latest, latestByUser = new Map(), nextMe
 let overrideSyncGeneration = 0;
 
 function stopOverrideSync() {
+  firebaseConnected = false;
   overrideSyncGeneration += 1;
   if (unsubscribeOverrides) unsubscribeOverrides();
   unsubscribeOverrides = null;
-  statusExportReady = false;
 }
 
 async function startOverrideSync() {
@@ -1167,7 +1118,6 @@ async function startOverrideSync() {
     unsubscribers.forEach(fn => fn());
   };
   unsubscribeOverrides = cleanup;
-  workExportMessage = "";
   statusOverrides = {};
   statusChangeDetails = {};
   statusChangeDetailsReady = false;
@@ -1182,7 +1132,6 @@ async function startOverrideSync() {
   const fail = (error) => {
     if (closed || !isCurrent()) return;
     cleanup();
-    statusExportReady = false;
     updateFirebaseSyncState("오류", 0);
     console.error("Firebase scoped synchronization failed", error);
     alert("작업내역 동기화 실패: JSON 파일, Firebase 조회 권한과 네트워크를 확인한 뒤 새로고침하세요.\n" + (error?.message || ""));
@@ -1210,9 +1159,9 @@ async function startOverrideSync() {
       snapshotsByIndex.forEach(snap => {
         applyOverrideSnapshotToState(snap, next, latestRef, latestByUser, nextMemos, nextChanges);
       });
-      statusExportReady = [...snapshotsByIndex.values()]
-        .every(snap => !snap.metadata.fromCache && !snap.metadata.hasPendingWrites);
-      applySyncedOverrideState(next, latestRef.value, latestByUser, nextMemos, nextChanges);
+      const connected = [...snapshotsByIndex.values()]
+        .every(snap => !snap.metadata.fromCache);
+      applySyncedOverrideState(next, latestRef.value, latestByUser, nextMemos, nextChanges, connected);
     };
 
     refs.forEach((ref, idx) => {
@@ -1220,8 +1169,7 @@ async function startOverrideSync() {
       const unsubscribe = onSnapshot(ref, { includeMetadataChanges: true }, (snapshot) => {
         if (closed || !isCurrent()) return;
         snapshotsByIndex.set(idx, snapshot);
-        // Do not expose partial results as a complete export; coalesce initial batches.
-        statusExportReady = false;
+        // Wait for every scoped snapshot before updating the connection badge.
         if (flushTimer === null) flushTimer = setTimeout(flush, 40);
       }, fail);
       if (closed) unsubscribe();
@@ -1333,7 +1281,6 @@ function initAuthSync() {
 
     if (!currentUser) {
       if (restrictionRedirectPending) firebaseReady = false;
-      statusExportReady = false;
       statusChangeDetails = {};
       statusChangeDetailsReady = false;
       stopInactivityLogout();
@@ -1412,7 +1359,7 @@ function renderLoginStatus() {
     <button id="kdnLogoutBtn" type="button" style="border:none;background:#111827;color:#fff;border-radius:999px;padding:4px 7px;font-size:11px;cursor:pointer;">로그아웃</button>
   `;
   document.body.appendChild(box);
-  if (isAdminUser()) { const back=document.createElement("button");back.type="button";back.textContent="관리자 메뉴";back.style.cssText="border:0;border-radius:20px;padding:5px 9px;background:#fee500;font-weight:750;cursor:pointer";back.onclick=()=>location.assign("index.html");box.querySelector("#kdnLogoutBtn").before(back); }
+  if (isAdminUser()) { const back=document.createElement("button");back.type="button";back.textContent="업무 메뉴로";back.style.cssText="border:0;border-radius:20px;padding:5px 9px;background:#fee500;font-weight:750;cursor:pointer";back.onclick=()=>location.assign("index.html");box.querySelector("#kdnLogoutBtn").before(back); }
   box.querySelector("#kdnLogoutBtn").onclick = () => { stopInactivityLogout(); signOut(auth); };
 }
 
@@ -1429,7 +1376,7 @@ function renderAdminDashboardButton() {
   const btn = document.createElement("button");
   btn.id = "kdnAdminDashboardBtn";
   btn.type = "button";
-  btn.textContent = "관리자";
+  btn.textContent = "관리자 메뉴";
   btn.style.position = "fixed";
   btn.style.right = "10px";
   btn.style.bottom = "52px";
@@ -1450,10 +1397,6 @@ function renderAdminDashboardButton() {
 
 function openAdminDashboard() {
   if (!isAdminUser()) return;
-
-  if (!canViewFirebaseAdminTab()) {
-    adminDashboardTab = "workers";
-  }
 
   if (!adminDashboardPanel) {
     adminDashboardPanel = document.createElement("div");
@@ -1481,155 +1424,6 @@ function closeAdminDashboard() {
   if (adminDashboardPanel) {
     adminDashboardPanel.style.display = "none";
   }
-}
-
-function collectWorkExportRows(changes, memos, exportGroups, statusFilter, workLabel) {
-  const rowsByKey = new Map();
-  exportGroups.forEach(group => (group.rows || []).forEach((row, index) => {
-    const key = getStableRowKey(group.n, index, row);
-    if (!rowsByKey.has(key)) rowsByKey.set(key, { row, groups: new Set() });
-    rowsByKey.get(key).groups.add(String(group.n));
-  }));
-  return Object.entries(changes)
-    .filter(([, change]) => !statusFilter || change.status === statusFilter)
-    .sort(([a, x], [b, y]) => (y.updatedAtMs || 0) - (x.updatedAtMs || 0) || a.localeCompare(b))
-    .map(([key, change]) => {
-      const match = rowsByKey.get(key);
-      const row = match?.row;
-      const memoTexts = match ? [...new Set([...match.groups].map(groupNo =>
-        String(memos[getMarkerMemoDocKey(groupNo)]?.text || "")).filter(Boolean))] : [];
-      return [workLabel, String(row?.c ?? change.contractNo ?? ""),
-        String(row?.m ?? change.meterNo ?? ""), row ? getOriginalRowStatus(row) : "확인 불가",
-        String(change.status || ""),
-        getDisplayUserId(change.updatedByEmail),
-        change.updatedAtMs ? formatStatusChangeTime(change.updatedAtMs) : "",
-        memoTexts.join("\n\n"), String(row?.f || change.address || ""),
-        match ? "" : "현재 지도 데이터에 없는 기록 · 메모 연결 불가"];
-    });
-}
-
-async function exportWorkExcel() {
-  if (!isAdminUser() || !currentUser || workExportBusy) return;
-  if (!statusExportReady) {
-    workExportMessage = "상태 동기화가 완료된 뒤 다시 시도하세요.";
-    renderAdminDashboardContent();
-    return;
-  }
-  const type = activeWorkType;
-  const uid = currentUser.uid;
-  const loaded = loadedTiles;
-  const filter = workExportStatus;
-  const label = type === "relay_table" ? "보강공사_중계표" : getWorkTypeLabel(type);
-  const isCurrent = () => currentUser?.uid === uid && isAdminUser() &&
-    activeWorkType === type && loadedTiles === loaded;
-  workExportBusy = true;
-  workExportMessage = "계기와 메모를 연결하고 있습니다…";
-  renderAdminDashboardContent();
-  try {
-    // 지도 범위/검색/지사 필터에 관계없이 해당 파트 JSON을 읽습니다.
-    // 정적 JSON만 필요하며 Firestore getDocs/getDoc 또는 별도 구독은 하지 않습니다.
-    await loadAllTiles();
-    if (!isCurrent()) return;
-    if (!statusExportReady) throw new Error("상태 동기화를 확인한 뒤 다시 다운로드하세요.");
-    const rows = collectWorkExportRows(statusChangeDetails, markerMemos, groups, filter, label);
-    if (!rows.length) {
-      workExportMessage = "선택한 조건에 해당하는 상태변경 내역이 없습니다.";
-      return;
-    }
-    workExportMessage = `${rows.length.toLocaleString()}건의 엑셀을 만들고 있습니다…`;
-    renderAdminDashboardContent();
-    await new Promise(resolve => setTimeout(resolve, 0));
-    if (!isCurrent()) return;
-    const workbook = createWorkExportWorkbook(rows);
-    const stamp = formatStatusChangeTime(Date.now()).replace(/[-:]/g, "").replace(" ", "_");
-    const url = URL.createObjectURL(workbook);
-    const anchor = document.createElement("a");
-    try {
-      anchor.href = url;
-      anchor.download = `KDN_MAP_${label}_${filter || "전체변경"}_${stamp}.xlsx`;
-      document.body.appendChild(anchor);
-      anchor.click();
-    } finally {
-      anchor.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 60000);
-    }
-    const unmatched = rows.filter(row => row[9]).length;
-    workExportMessage = `${rows.length.toLocaleString()}건 다운로드 요청 완료` +
-      (unmatched ? ` · 지도에 없는 ${unmatched.toLocaleString()}건도 포함했습니다. 엑셀의 비고를 확인하세요.` : "");
-  } catch (error) {
-    if (isCurrent()) workExportMessage = `다운로드 실패: ${error.message || "잠시 후 다시 시도하세요."}`;
-  } finally {
-    workExportBusy = false;
-    if (!isCurrent()) workExportMessage = "";
-    renderAdminDashboardContent();
-  }
-}
-
-// 외부 라이브러리/CDN 없이 표준 XLSX(OOXML + ZIP)를 생성합니다.
-// 모든 데이터 셀을 문자열로 저장해 계약/계기번호의 앞자리 0과 긴 번호를 보존합니다.
-function workExcelXmlText(value) {
-  const text = String(value ?? "");
-  if (text.length > 32767) throw new Error("엑셀 한 셀의 최대 글자 수(32,767자)를 넘는 내용이 있습니다.");
-  return text.replace(/_x[0-9a-fA-F]{4}_/g, match => "_x005F_" + match.slice(1))
-    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]/g,
-      char => `_x${char.charCodeAt(0).toString(16).padStart(4, "0")}_`)
-    .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;").replaceAll("'", "&apos;")
-    .replaceAll("\r", "&#13;");
-}
-
-function createWorkExportWorkbook(rows) {
-  if (rows.length > 1048575) throw new Error("엑셀 한 시트의 행 한도를 초과했습니다. 변경상태를 나눠 추출하세요.");
-  const header = ["파트", "계약번호", "계기번호", "기존상태", "작업결과", "작업자", "작업일자(한국시간)", "메모", "지번주소", "비고"];
-  const xmlStart = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
-  const sheetRows = [header, ...rows].map((row, index) => {
-    const cells = row.map((value, col) => `<c r="${String.fromCharCode(65 + col)}${index + 1}" s="${index === 0 ? 1 : 0}" t="inlineStr"><is><t xml:space="preserve">${workExcelXmlText(value)}</t></is></c>`).join("");
-    return `<row r="${index + 1}"${index === 0 ? ' ht="24" customHeight="1"' : ""}>${cells}</row>`;
-  }).join("");
-  const sheet = xmlStart + `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:J${rows.length + 1}"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="18"/><cols>${[20,24,24,18,18,18,24,55,45,45].map((width,i)=>`<col min="${i+1}" max="${i+1}" width="${width}" customWidth="1"/>`).join("")}</cols><sheetData>${sheetRows}</sheetData><autoFilter ref="A1:J${rows.length+1}"/></worksheet>`;
-  const files = {
-    "[Content_Types].xml": xmlStart + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>',
-    "_rels/.rels": xmlStart + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
-    "xl/workbook.xml": xmlStart + '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="작업내역" sheetId="1" r:id="rId1"/></sheets></workbook>',
-    "xl/_rels/workbook.xml.rels": xmlStart + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>',
-    "xl/styles.xml": xmlStart + '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="맑은 고딕"/></font><font><b/><color rgb="FFFFFFFF"/><sz val="11"/><name val="맑은 고딕"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF1E3A5F"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="49" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf><xf numFmtId="49" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment vertical="center"/></xf></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>',
-    "xl/worksheets/sheet1.xml": sheet
-  };
-  return createWorkExcelZip(files);
-}
-
-function createWorkExcelZip(files) {
-  const encoder = new TextEncoder();
-  const table = new Uint32Array(256);
-  for (let n = 0; n < 256; n++) {
-    let value = n;
-    for (let k = 0; k < 8; k++) value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
-    table[n] = value >>> 0;
-  }
-  const parts = [], directory = [];
-  let offset = 0, directorySize = 0;
-  for (const [filename, xml] of Object.entries(files)) {
-    const name = encoder.encode(filename), data = encoder.encode(xml);
-    let crc = 0xffffffff;
-    for (const byte of data) crc = table[(crc ^ byte) & 255] ^ (crc >>> 8);
-    crc = (crc ^ 0xffffffff) >>> 0;
-    if (offset + data.length + name.length + 30 > 0xffffffff) throw new Error("엑셀 파일이 너무 큽니다. 변경상태별로 나눠 추출하세요.");
-    const local = new Uint8Array(30 + name.length), lv = new DataView(local.buffer);
-    lv.setUint32(0, 0x04034b50, true); lv.setUint16(4, 20, true); lv.setUint16(6, 0x800, true);
-    lv.setUint16(12, 33, true); lv.setUint32(14, crc, true);
-    lv.setUint32(18, data.length, true); lv.setUint32(22, data.length, true); lv.setUint16(26, name.length, true);
-    local.set(name, 30);
-    const central = new Uint8Array(46 + name.length), cv = new DataView(central.buffer);
-    cv.setUint32(0, 0x02014b50, true); cv.setUint16(4, 20, true); cv.setUint16(6, 20, true); cv.setUint16(8, 0x800, true);
-    cv.setUint16(14, 33, true); cv.setUint32(16, crc, true); cv.setUint32(20, data.length, true); cv.setUint32(24, data.length, true);
-    cv.setUint16(28, name.length, true); cv.setUint32(42, offset, true); central.set(name, 46);
-    parts.push(local, data); directory.push(central);
-    offset += local.length + data.length; directorySize += central.length;
-  }
-  const end = new Uint8Array(22), view = new DataView(end.buffer);
-  view.setUint32(0, 0x06054b50, true); view.setUint16(8, directory.length, true); view.setUint16(10, directory.length, true);
-  view.setUint32(12, directorySize, true); view.setUint32(16, offset, true);
-  return new Blob([...parts, ...directory, end], {type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
 }
 
 function getWorkersByRegion() {
@@ -1695,87 +1489,21 @@ function renderAdminDashboardContent() {
     return;
   }
 
-  if (!canViewFirebaseAdminTab()) {
-    adminDashboardTab = "workers";
-  }
-
-  const statusColor = firebaseSyncState.status === "연결됨"
-    ? "#16a34a"
-    : (firebaseSyncState.status === "오류" ? "#dc2626" : "#ca8a04");
-
-  const tabsHtml = `
-    <div style="display:flex;gap:6px;margin-bottom:12px;">
-      ${canViewFirebaseAdminTab() ? `
-      <button type="button" id="adminTabFirebase"
-        style="flex:1;height:38px;border:none;border-radius:12px;font-weight:900;cursor:pointer;background:${adminDashboardTab === "firebase" ? "#111827" : "#f3f4f6"};color:${adminDashboardTab === "firebase" ? "#fff" : "#111827"};">
-        Firebase 상태
-      </button>
-      ` : ``}
-      <button type="button" id="adminTabWorkers"
-        style="flex:1;height:38px;border:none;border-radius:12px;font-weight:900;cursor:pointer;background:${adminDashboardTab === "workers" ? "#111827" : "#f3f4f6"};color:${adminDashboardTab === "workers" ? "#fff" : "#111827"};">
-        작업자 위치
-      </button>
-    </div>
-  `;
-
-  const bodyHtml = adminDashboardTab === "firebase" && canViewFirebaseAdminTab()
-    ? renderFirebaseStatusTab(statusColor)
-    : renderWorkerLocationTab();
-
+  const connected = firebaseConnected && navigator.onLine !== false;
+  const badge = connected ? "#15803d" : "#c0560b";
   adminDashboardPanel.innerHTML = `
-    <div style="width:min(560px,100%);max-height:82vh;background:#fff;border-radius:22px;box-shadow:0 24px 70px rgba(0,0,0,0.28);overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,'Apple SD Gothic Neo','Malgun Gothic',sans-serif;">
-      <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid #eef2f7;">
-        <div>
-          <div style="font-size:17px;font-weight:900;color:#111827;">관리자 대시보드</div>
-          <div style="font-size:11px;color:#6b7280;margin-top:3px;">관리자 전용 기능</div>
-        </div>
-        <button type="button" id="closeAdminDashboard"
-          style="width:34px;height:34px;border:none;border-radius:999px;background:#f3f4f6;font-size:18px;cursor:pointer;">×</button>
+    <section role="dialog" aria-modal="true" aria-labelledby="adminDashboardTitle" style="width:min(560px,100%);max-height:82vh;background:#fff;border-radius:22px;box-shadow:0 24px 70px #0004;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,'Malgun Gothic',sans-serif;">
+      <header style="display:flex;align-items:center;gap:8px;padding:14px 16px;border-bottom:1px solid #eef2f7;">
+        <strong id="adminDashboardTitle" style="font-size:17px;color:#111827">관리자 대시보드</strong>
+        <span id="dashboardConnection" role="status" style="margin-left:auto;white-space:nowrap;display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:750;color:${badge}">
+          <i aria-hidden="true" style="width:8px;height:8px;border-radius:50%;background:${badge}"></i>Firebase ${connected ? "연결됨" : "연결안됨"}</span>
+        <button type="button" id="closeAdminDashboard" aria-label="닫기" style="width:30px;height:30px;border:none;border-radius:50%;background:#f3f4f6;font-size:17px;cursor:pointer">×</button>
+      </header>
+      <div style="padding:14px 16px 16px;overflow-y:auto;max-height:calc(82vh - 65px);">
+        <h3 style="font-size:15px;margin:0 0 9px;color:#111827;">작업자 위치</h3>${renderWorkerLocationTab()}
       </div>
-      <div style="padding:14px 16px 16px;overflow-y:auto;max-height:calc(82vh - 64px);">
-        <div style="padding:12px;margin-bottom:12px;border:1px solid #bfdbfe;border-radius:12px;background:#eff6ff;">
-          <div style="font-size:13px;font-weight:800;margin-bottom:6px;">${escapeHtml(getWorkTypeLabel())} 작업내역 엑셀</div>
-          <div style="font-size:11px;color:#475569;margin-bottom:8px;">현재 파트의 상태변경 기록만 · 계기별 최종 변경내용과 현재 메모</div>
-          <div style="display:flex;gap:6px;flex-wrap:wrap;">
-            <select id="workExportStatus" ${workExportBusy ? "disabled" : ""} style="min-width:120px;height:36px;border:1px solid #cbd5e1;border-radius:8px;background:white;">
-              ${["", ...COMPLETION_STATUSES].map(value => `<option value="${escapeHtml(value)}" ${workExportStatus === value ? "selected" : ""}>${escapeHtml(value || "전체 변경상태")}</option>`).join("")}
-            </select>
-            <button id="exportWorkExcel" type="button" ${workExportBusy || !statusExportReady ? "disabled" : ""} style="height:36px;padding:0 12px;border:0;border-radius:8px;background:#1d4ed8;color:white;font-weight:800;cursor:pointer;">${workExportBusy ? "엑셀 준비 중…" : "엑셀 다운로드"}</button>
-          </div>
-          <div style="font-size:11px;color:#475569;margin-top:7px;" role="status">${escapeHtml(workExportMessage || (statusExportReady ? "" : "상태 동기화가 완료되면 다운로드할 수 있습니다."))}</div>
-        </div>
-        ${tabsHtml}
-        ${bodyHtml}
-      </div>
-    </div>
-  `;
-
+    </section>`;
   adminDashboardPanel.querySelector("#closeAdminDashboard").onclick = closeAdminDashboard;
-  adminDashboardPanel.querySelector("#exportWorkExcel").onclick = exportWorkExcel;
-  adminDashboardPanel.querySelector("#workExportStatus").onchange = event => {
-    workExportStatus = event.target.value;
-    workExportMessage = "";
-  };
-  const firebaseTabBtn = adminDashboardPanel.querySelector("#adminTabFirebase");
-  if (firebaseTabBtn) {
-    firebaseTabBtn.onclick = () => {
-      adminDashboardTab = "firebase";
-      renderAdminDashboardContent();
-    };
-  }
-  const workersTabBtn = adminDashboardPanel.querySelector("#adminTabWorkers");
-  if (workersTabBtn) {
-    workersTabBtn.onclick = () => {
-      adminDashboardTab = "workers";
-      renderAdminDashboardContent();
-    };
-  }
-
-  renderFirebaseResetProgress();
-  adminDashboardPanel.querySelectorAll("[data-reset-worktype]").forEach(btn => {
-    btn.onclick = () => resetFirebaseOverridesFromAdmin(btn.getAttribute("data-reset-worktype"));
-  });
-
   adminDashboardPanel.querySelectorAll("[data-admin-worker-region]").forEach(btn => {
     btn.onclick = () => {
       adminWorkerLocationRegion = btn.getAttribute("data-admin-worker-region");
@@ -1789,86 +1517,6 @@ function renderAdminDashboardContent() {
   });
 }
 
-
-// Reset only the selected part's status documents; marker memos are retained.
-let firebaseResetBusy = false;
-let firebaseResetProgress = "";
-function renderFirebaseResetProgress() {
-  document.querySelectorAll("[data-reset-worktype]").forEach(button => {
-    button.disabled = firebaseResetBusy;
-    if (firebaseResetBusy) button.textContent = firebaseResetProgress;
-  });
-}
-async function resetFirebaseOverridesFromAdmin(targetWorkType = activeWorkType) {
-  if (!isAdminUser() || !canViewFirebaseAdminTab()) {
-    alert("현재 파트의 Firebase 초기화 권한이 없습니다.");
-    return;
-  }
-  if (!WORK_TYPES[targetWorkType] || targetWorkType !== activeWorkType) {
-    alert("현재 선택한 파트만 초기화할 수 있습니다. 해당 파트로 이동한 뒤 다시 실행하세요.");
-    return;
-  }
-  if (firebaseResetBusy) return;
-  const workLabel = getWorkTypeLabel(targetWorkType);
-  if (!confirm(`${workLabel} Firebase 변경값을 초기화할까요?\n\n` +
-    "선택한 파트의 작업 상태 변경값만 삭제합니다.\n" +
-    "화면은 해당 작업의 최신 JSON 기준 상태로 돌아갑니다. 메모는 유지됩니다.\n\n" +
-    "이 작업은 되돌릴 수 없습니다.")) return;
-  if (!confirm(`정말로 ${workLabel} 변경값만 초기화하시겠습니까?`)) return;
-  firebaseResetBusy = true;
-  firebaseResetProgress = "초기화 대상 확인 중…";
-  renderFirebaseResetProgress();
-  let deletedCount = 0, newerCount = 0, cursor = null;
-  try {
-    do {
-      if (activeWorkType!==targetWorkType || !canViewFirebaseAdminTab()) {
-        throw Error("파트 또는 로그인 권한이 변경되어 중단했습니다.");
-      }
-      const page=await window.KDN_CONTEXT.resetStatusPage(targetWorkType,cursor);
-      if (!Number.isSafeInteger(page?.deleted) || page.deleted<0 || !Number.isSafeInteger(page.newer) ||
-          page.newer<0 || !(page.next===null || (typeof page.next==="string" && page.next && page.next!==cursor))) {
-        throw Error("초기화 응답을 확인할 수 없습니다. 지도를 새로고침하세요.");
-      }
-      deletedCount+=page.deleted; newerCount+=page.newer; cursor=page.next;
-      firebaseResetProgress="초기화 중 · "+deletedCount.toLocaleString()+"건 삭제";
-      renderFirebaseResetProgress();
-    } while (cursor!==null);
-    alert(workLabel+" Firebase 변경값 초기화 완료\\n삭제된 상태 변경값: "+deletedCount.toLocaleString()+"건"+
-      (newerCount?"\\n초기화 시작 후 변경되어 유지된 기록: "+newerCount.toLocaleString()+"건":""));
-  } catch (error) {
-    alert(workLabel+" 초기화 중단 · 서버 응답으로 확인된 삭제: "+deletedCount.toLocaleString()+"건\\n"+
-      (error?.message||"네트워크 연결을 확인하세요.")+"\\n현재 상태를 확인한 뒤 다시 실행하세요.");
-  } finally {
-    firebaseResetBusy = false;
-    firebaseResetProgress = "";
-    renderAdminDashboardContent();
-  }
-}
-
-function renderFirebaseStatusTab(statusColor) {
-  return `
-    <div style="border:1px solid #e5e7eb;border-radius:16px;padding:14px;background:#fafafa;">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
-        <span style="width:10px;height:10px;border-radius:999px;background:${statusColor};display:inline-block;"></span>
-        <strong style="font-size:15px;color:#111827;">${escapeHtml(firebaseSyncState.status)}</strong>
-      </div>
-      <div style="font-size:13px;line-height:1.9;color:#374151;">
-        <div><strong>마지막 동기화:</strong> ${escapeHtml(formatDateTime(firebaseSyncState.lastSyncAt))}</div>
-        <div><strong>동기화 범위:</strong> ${escapeHtml(firebaseSyncState.scope || (isAdminUser() ? "전체" : getAllowedRegionNames().join(", ")))}</div>
-        <div><strong>상태 변경 문서 수:</strong> ${Number(firebaseSyncState.docCount || 0).toLocaleString()}개</div>
-      </div>
-      <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap;">
-        <button type="button" data-reset-worktype="${escapeHtml(activeWorkType)}" style="border:none;border-radius:12px;background:${({ reinforcement: "#dc2626", low_voltage: "#2563eb", high_voltage: "#7c3aed", relay_table: "#059669" })[activeWorkType] || "#dc2626"};color:#fff;font-weight:900;font-size:13px;padding:10px 12px;cursor:pointer;">${escapeHtml(getWorkTypeLabel())} 초기화</button>
-      </div>
-      <div style="margin-top:10px;font-size:12px;color:#6b7280;line-height:1.6;">
-        현재 선택한 ${escapeHtml(getWorkTypeLabel())} 파트의 변경값을 초기화합니다. 다른 파트를 초기화하려면 지도에서 해당 파트를 먼저 선택하세요.
-      </div>
-      <div style="margin-top:8px;font-size:12px;color:#6b7280;line-height:1.6;">
-        ${activeWorkType === "reinforcement" ? "보강공사 작업자는 담당 권역 지사만 동기화합니다." : "저압/고압/중계표는 권역 구분 없이 해당 작업 종류의 상태값만 동기화합니다."}
-      </div>
-    </div>
-  `;
-}
 
 function renderWorkerLocationTab() {
   if (activeWorkType !== "reinforcement") {
@@ -2018,18 +1666,6 @@ function getRowStatusChange(groupNo, idx, row) {
   if (!detail) return Object.prototype.hasOwnProperty.call(statusOverrides, key) ? undefined : null;
   if (detail.status !== normalizeStatus(statusOverrides[key])) return undefined;
   return detail;
-}
-
-function formatStatusChangeTime(milliseconds) {
-  if (!Number.isFinite(milliseconds) || milliseconds <= 0) return "기록 없음";
-  const date = new Date(milliseconds);
-  if (!Number.isFinite(date.getTime())) return "기록 없음";
-  const parts = new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Asia/Seoul", year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23"
-  }).formatToParts(date);
-  const p = Object.fromEntries(parts.map(part => [part.type, part.value]));
-  return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}`;
 }
 
 function getBucketStatusChange(group, bucket) {
@@ -3739,12 +3375,6 @@ window.changeRowStatus = function(groupNo, idx, value) {
   window.changeGroupedStatus(groupNo, String(idx), value);
 };
 
-
-function getDisplayUserId(email) {
-  const value = String(email || "").trim();
-  if (!value) return "";
-  return value.replace("@kdn.local", "");
-}
 
 function clearLatestUpdateLabel() {
   if (latestUpdateOverlay) {

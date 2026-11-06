@@ -2,6 +2,8 @@ const PARTS={reinforcement:"보강공사",low_voltage:"저압",high_voltage:"고
 const REGIONS=["1권역","2권역","3권역","4권역","5권역"];
 const menus=[
  ["map","지도","지도에서 계기를 확인하고 현장 작업을 관리해요.","FIELD MAP","mapc",'<path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3zm6-3v15m6-12v15"/>'],
+ ["history","작업내역 확인","계기번호·계약번호로 작업결과와 작업자를 확인해요.","WORK RECORDS","histc",'<circle cx="10" cy="10" r="6"/><path d="m15 15 6 6M7 10h6m-6 3h3"/>'],
+ ["workfiles","엑셀 다운로드","파트별 변경내역을 내려받고 작업 상태를 관리해요.","WORK EXPORT","filec",'<path d="M5 3h10l4 4v14H5zM14 3v5h5m-7 3v6m-3-3 3 3 3-3"/>'],
  ["upload","엑셀업로드","파트별 엑셀을 검사하고 지도 자료를 갱신해요.","MAP DATA","uplc",'<path d="M6 3h8l4 4v5M6 3v17h8M14 3v5h5m-2 13v-7m-3 3 3-3 3 3"/>'],
  ["workers","작업자관리","파트와 담당 권역, 계정 사용 상태를 관리해요.","FIELD TEAM","workc",'<circle cx="9" cy="8" r="3"/><path d="M2 20v-2a7 7 0 0 1 14 0v2m0-15a3 3 0 0 1 0 6m2 3a5 5 0 0 1 4 5"/>'],
 ];
@@ -16,7 +18,8 @@ function bindFiles(root,cb){const el=root.querySelector("input[type=file]"),labe
  el.onchange=()=>pick(el.files);label.ondragover=e=>{e.preventDefault();label.classList.add("hot");};label.ondragleave=()=>label.classList.remove("hot");label.ondrop=e=>{e.preventDefault();label.classList.remove("hot");pick(e.dataTransfer.files);};}
 function notice(node,msg,bad=false){if(!node)return;node.className="notice"+(bad?" err":"");node.textContent=msg||"";}
 export function mount(host,options){
- const {me,api,connected}=options;let seq=0,cleanup=()=>{};
+ const {me,api,connected}=options;let seq=0,cleanup=()=>{},resetLock=false;
+ if(me.role!=="admin"||me.blocked)throw Error("관리자 계정만 사용할 수 있습니다.");
  const adminMenu=["permissions","권한관리","관리자 명단과 파트별 관리 범위를 지정해요.","ACCESS CONTROL","admc",'<path d="M12 2 4 5v6c0 5 3 8 8 11 5-3 8-6 8-11V5z"/><path d="m8.5 12 2.5 2.5 4.5-5"/>'];
  const shown=me.owner?[...menus,adminMenu]:menus;
  const action=(el,key,fn)=>{const b=el.querySelector('[data-act="'+key+'"]');if(b)b.onclick=fn;return b;};
@@ -114,6 +117,91 @@ export function mount(host,options){
   action(el,"saveAdmin",()=>save("grant"));action(el,"revokeAdmin",()=>save("revoke"));field.oninput=select;q.oninput=render;
   render();if(!connected)notice(msg,"Firebase 관리 기능 연결 전입니다. 기존 명단을 표시합니다.");load().catch(e=>notice(msg,e.message,true));
  }
- function route(){++seq;cleanup();cleanup=()=>{};const h=location.hash.slice(1);if(h==="upload")upload();else if(h==="workers")workers();else if(h==="permissions"&&me.owner)permissions();else home();}
+ function historyView(part=me.parts.length>1?"all":me.parts[0],which="any",value=""){
+  const el=head("작업내역 확인","계기번호 또는 계약번호(고객번호)로 계기별 작업결과와 마지막 작업자를 확인합니다.");
+  const ac=new AbortController();let service,items=[],page=0,busy=false;
+  cleanup=()=>{ac.abort();service?.clear();};
+  const parts=partButtons(part).replace('aria-label="파트 선택">','aria-label="파트 선택">'+(me.parts.length>1?'<button type="button" data-part="all" aria-pressed="'+(part==="all")+'">담당 전체</button>':""));
+  el.innerHTML='<section class="panel"><div class="tinylabel">WORK RECORDS</div><h3>조회할 파트</h3>'+parts+
+   '<form class="record-search"><div><label class="field" for="recordKind">검색 기준</label><select id="recordKind"><option value="any">계기번호 또는 계약번호</option><option value="meter">계기번호</option><option value="contract">계약번호(고객번호)</option></select></div>'+
+   '<div><label class="field" for="recordValue">조회할 번호</label><input id="recordValue" type="search" maxlength="120" autocomplete="off" required placeholder="앞자리 0을 포함한 전체 번호"></div><button class="primary" type="submit">조회</button></form>'+
+   '<p class="mini">'+(options.preview?"예시 계기번호 00101 · 계약번호 000123":"같은 계약의 계기가 여러 대이면 각 계기를 따로 표시합니다.")+'</p></section>'+
+   '<section class="panel record-panel" aria-label="조회 결과"><h3>조회 결과</h3><div class="notice" role="status">번호를 입력하고 조회하세요.</div><div data-results></div></section>';
+  const form=el.querySelector("form"),kind=el.querySelector("#recordKind"),val=el.querySelector("#recordValue"),msg=el.querySelector(".notice"),out=el.querySelector("[data-results]");
+  kind.value=which;val.value=value;
+  bindParts(el,p=>{cleanup();historyView(p,kind.value,val.value);});
+  function paint(){
+   out.replaceChildren();if(!items.length)return;
+   const size=25, pages=Math.ceil(items.length/size);page=Math.max(0,Math.min(page,pages-1));
+   const rowHtml=items.slice(page*size,(page+1)*size).map(it=>{
+     const r=it.row,work=it.change||it.past, label=it.change?"변경됨":it.past?"이전 작업 기록":"현재 변경 없음";
+     const sub=it.orphan?"현재 지도에 없는 기록":it.past?"현재 변경값 없음":it.pastUnknown?"이전 로그 확인 불가":"";
+     return '<tr><td>'+esc(PARTS[it.part])+'</td><td><b>'+esc(r.meter||"—")+'</b><small>'+esc(r.branch||r.address)+'</small></td><td>'+esc(r.contract||"—")+'</td>'+
+       '<td><span class="result-tag '+(it.change?"changed":it.past?"earlier":"")+'">'+label+'</span><small>'+esc(sub)+'</small></td>'+
+       '<td>'+esc(work?(work.result||"상태 해제"):"—")+'</td><td>'+esc(work?(work.worker||"기록 없음"):"—")+'</td><td class="workdate">'+esc(work?.when||"—")+'</td></tr>';
+   }).join("");
+   out.innerHTML='<div class="record-table-scroll" tabindex="0" aria-label="계기별 작업내역"><table class="record-table"><thead><tr>'+["파트","계기번호","계약번호","변경 여부","작업결과","작업자","작업일시"].map(x=>'<th scope="col">'+x+'</th>').join("")+'</tr></thead><tbody>'+rowHtml+'</tbody></table></div>'+
+    (pages>1?'<div class="record-pages">'+btn("이전","prevPage")+'<span>'+(page+1)+' / '+pages+'</span>'+btn("다음","nextPage")+'</div>':"");
+   if(pages>1){action(out,"prevPage",()=>{page--;paint();}).disabled=page===0;action(out,"nextPage",()=>{page++;paint();}).disabled=page===pages-1;}
+  }
+  const clearResults=()=>{items=[];page=0;out.replaceChildren();notice(msg,"번호를 입력하고 조회하세요.");};kind.onchange=clearResults;val.oninput=clearResults;
+  form.onsubmit=async event=>{
+   event.preventDefault();const value=val.value.trim();if(!value||busy)return;
+   busy=true;items=[];page=0;out.replaceChildren();for(const c of form.elements)c.disabled=true;
+   try {
+    service=await options.records();if(ac.signal.aborted)return;
+    const errors=[];for(const p of (part==="all"?me.parts:[part])){
+      try{notice(msg,PARTS[p]+" · 조회 중…");const rows=await service.lookup(p,kind.value,value,{signal:ac.signal,progress:t=>notice(msg,PARTS[p]+" · "+t)});for(const row of rows)items.push(row);}
+      catch(e){if(ac.signal.aborted)return;errors.push(PARTS[p]+": "+e.message);}
+    }
+    if(ac.signal.aborted)return;
+    items.sort((a,b)=>Number(!!b.change)-Number(!!a.change)||((b.change||b.past)?.time||0)-((a.change||a.past)?.time||0)||a.row.meter.localeCompare(b.row.meter,"ko"));
+    const result=items.length?"일치하는 계기·기록 "+num(items.length)+"건 · 현재 변경 "+num(items.filter(r=>r.change).length)+"건":
+      errors.length?"조회가 완료되지 않았습니다.":"현재 지도 자료와 저장된 변경값에서 일치하는 번호를 찾지 못했습니다.";
+    notice(msg,result+(errors.length?" 확인하지 못한 파트: "+errors.join(" / "):""),!!errors.length);paint();
+   }catch(e){if(!ac.signal.aborted)notice(msg,e.message,true);}
+   finally{busy=false;if(!ac.signal.aborted)for(const c of form.elements)c.disabled=false;}
+  };
+ }
+ function workFiles(part=me.parts[0]){
+  const el=head("엑셀 다운로드","선택한 파트의 작업내역을 엑셀로 내려받습니다.");
+  const allowed=has("reset"),ac=new AbortController();let busy=false,service;
+  cleanup=()=>{ac.abort();service?.clear();window.removeEventListener("beforeunload",beforeLeave);};
+  function beforeLeave(e){if(resetLock){e.preventDefault();e.returnValue="";}}
+  el.innerHTML='<section class="panel"><h3>대상 파트</h3>'+partButtons(part)+'</section><div class="panes"><section class="panel"><div class="tinylabel">01 / EXPORT</div><h3>작업내역 엑셀</h3>'+
+   '<p class="mini">상태를 변경한 계기만 포함합니다. 계기별 마지막 작업결과와 마커의 현재 메모를 함께 내려받습니다.</p><label class="field" for="resultFilter">작업결과</label>'+
+   '<select id="resultFilter">'+["","모뎀설치","작업불가","재방문"].map(s=>'<option value="'+s+'">'+(s||"전체 변경상태")+'</option>').join("")+'</select>'+
+   btn("엑셀 다운로드","downloadWork","primary wide")+'<div id="downloadNotice" class="notice" role="status"></div></section>'+
+   (allowed?'<section class="panel reset-card"><div class="tinylabel">02 / RESET</div><h3>Firebase 초기화</h3><p>대상 파트: <b>'+esc(PARTS[part])+'</b></p><p class="mini">이 파트의 작업 상태를 최신 엑셀 기준으로 되돌립니다. 메모와 이전 작업 로그는 유지됩니다.</p>'+
+    btn(PARTS[part]+" 변경값 초기화","resetPart","danger wide")+'<div id="resetNotice" class="notice" role="status"></div></section>':"")+'</div>';
+  bindParts(el,p=>{if(!busy){cleanup();workFiles(p);}});
+  const setBusy=v=>{busy=v;el.querySelectorAll("button,select").forEach(n=>n.disabled=v);};
+  action(el,"downloadWork",async()=>{
+   if(busy)return;const filter=el.querySelector("#resultFilter").value,msg=el.querySelector("#downloadNotice");
+   setBusy(true);notice(msg,"작업내역 확인 중…");
+   try{service=await options.records();if(ac.signal.aborted)return;
+    const f=await service.download(part,filter,{signal:ac.signal,progress:t=>notice(msg,t)});if(ac.signal.aborted)return;
+    if(!f.count){notice(msg,"선택한 조건에 해당하는 상태변경 내역이 없습니다.");return;}
+    const url=URL.createObjectURL(f.blob),a=document.createElement("a");
+    try{a.href=url;a.download=f.name;document.body.append(a);a.click();}finally{a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);}
+    notice(msg,num(f.count)+"건 다운로드 요청 완료"+(f.orphan?" · 현재 지도에 없는 "+num(f.orphan)+"건은 비고에 표시했습니다.":"."));
+   }catch(e){if(!ac.signal.aborted)notice(msg,"다운로드 실패: "+e.message,true);}finally{if(!ac.signal.aborted)setBusy(false);}
+  });
+  action(el,"resetPart",async()=>{
+   if(!allowed||busy||resetLock)return;
+   const label=PARTS[part],msg=el.querySelector("#resetNotice");
+   if(!confirm(label+" 파트의 작업 상태 변경값을 초기화할까요?\n메모와 작업 로그는 보존됩니다. 필요하면 먼저 작업내역 엑셀을 내려받으세요."))return;
+   if(!confirm("정말로 "+label+" 파트만 초기화하시겠습니까? 삭제된 변경값은 복구할 수 없습니다."))return;
+   resetLock=true;setBusy(true);host.querySelectorAll('[data-act="back"],[data-act="exit"]').forEach(b=>b.disabled=true);
+   window.addEventListener("beforeunload",beforeLeave);notice(msg,"초기화 대상 확인 중…");
+   try{service=await options.records();if(ac.signal.aborted)return;
+    const r=await service.reset(part,{signal:ac.signal,progress:t=>notice(msg,t)});if(ac.signal.aborted)return;
+    notice(msg,label+" 초기화 완료 · 변경값 "+num(r.deleted)+"건 삭제"+(r.newer?" · 초기화 도중 수정된 "+num(r.newer)+"건 유지":""));
+   }catch(e){if(!ac.signal.aborted)notice(msg,e.message,true);}
+   finally{resetLock=false;window.removeEventListener("beforeunload",beforeLeave);if(!ac.signal.aborted){setBusy(false);host.querySelectorAll('[data-act="back"],[data-act="exit"]').forEach(b=>b.disabled=false);}}
+  });
+ }
+
+ function route(){if(resetLock){if(location.hash!=="#workfiles")history.replaceState(null,"","#workfiles");return;}++seq;cleanup();cleanup=()=>{};const h=location.hash.slice(1);if(h==="history")historyView();else if(h==="workfiles")workFiles();else if(h==="upload")upload();else if(h==="workers")workers();else if(h==="permissions"&&me.owner)permissions();else home();}
  window.addEventListener("hashchange",route);route();
 }
