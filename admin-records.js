@@ -28,9 +28,8 @@ function record(part,d) {
     time:ms, meter:text(d.meterNo), contract:text(d.contractNo),
     address:text(d.address), branch:text(d.branch)};
 }
-function numbers(which,q,row) {
-  return (which!=="contract" && normalizeNumber(row.meter)===q) ||
-    (which!=="meter" && normalizeNumber(row.contract)===q);
+function numbers(q,row) {
+  return normalizeNumber(row.meter)===q || normalizeNumber(row.contract)===q;
 }
 function collectLatest(part,docs) {
   const map=new Map();
@@ -136,7 +135,7 @@ export async function makeFirebaseReader() {
   };
 }
 export function createRecordService({authorize,active,api,reader=makeFirebaseReader,json=readJson,workbook}) {
-  let cached=null,dbPromise=null;
+  const cached=new Map();let dbPromise=null;
   const db=()=>dbPromise || (dbPromise=Promise.resolve().then(reader).catch(e=>{dbPromise=null;throw e;}));
   function start(part,opt) {
     if(!own(PART_INFO,part))throw Error("파트를 다시 선택하세요.");
@@ -144,18 +143,27 @@ export function createRecordService({authorize,active,api,reader=makeFirebaseRea
     const progress=t=>{check();opt.progress?.(t);};check();return {check,progress};
   }
   async function catalog(part,opt,check,progress) {
-    if(cached?.part===part && Date.now()-cached.at<90000)return cached.rows;
-    cached=null;
-    const rows=await loadCatalog(part,json,opt.signal,check,progress);check();cached={part,rows,at:Date.now()};return rows;
+    const hit=cached.get(part),now=Date.now();
+    if(hit && now-hit.at<90000){cached.delete(part);cached.set(part,hit);return hit.rows;}
+    cached.delete(part);
+    const rows=await loadCatalog(part,json,opt.signal,check,progress);check();
+    for(const [key,item] of cached)if(now-item.at>=90000)cached.delete(key);
+    cached.set(part,{rows,at:Date.now()});
+    // A lookup always covers every allowed part. Reuse compact catalogs between
+    // lookups, retaining the largest one and a bounded number of additional rows.
+    const biggest=[...cached].reduce((a,b)=>a[1].rows.size>=b[1].rows.size?a:b)[0];
+    let extra=[...cached].reduce((n,[k,c])=>n+(k===biggest?0:c.rows.size),0);
+    for(const [k,c] of cached){if(extra<=100000)break;if(k!==biggest){cached.delete(k);extra-=c.rows.size;}}
+    return rows;
   }
-  async function lookup(part,which,raw,opt={}) {
+  async function lookup(part,raw,opt={}) {
     const {check,progress}=start(part,opt),q=normalizeNumber(raw);
-    if(!["any","meter","contract"].includes(which)||!q||String(raw).length>120)throw Error("조회할 계기번호 또는 계약번호를 입력하세요.");
+    if(!q||String(raw).length>120)throw Error("조회할 계기번호 또는 계약번호를 입력하세요.");
     await authorize(part);check();
     const cat=await catalog(part,opt,check,progress), matched=[];
-    for(const row of cat.values())if(numbers(which,q,row))matched.push(row);
+    for(const row of cat.values())if(numbers(q,row))matched.push(row);
     const needles=[];
-    for(const field of Object.keys(fieldNames))if(which==="any"||which===field) {
+    for(const field of Object.keys(fieldNames)) {
       const values=new Set([text(raw).trim(),q,...matched.filter(r=>normalizeNumber(r[field])===q).map(r=>r[field])]);
       needles.push([fieldNames[field],[...values].filter(Boolean)]);
     }
@@ -169,17 +177,16 @@ export function createRecordService({authorize,active,api,reader=makeFirebaseRea
     catch(e){check();if(e?.code==="unauthenticated")throw e;pastUnavailable=true;}
     const items=matched.map(row=>({part,row,change:changes.get(row.key)||null,past:historic.get(row.key)||null,
       pastUnknown:pastUnavailable && !changes.has(row.key),orphan:false}));
-    for(const [key,r] of changes)if(!keySet.has(key) && numbers(which,q,r))
+    for(const [key,r] of changes)if(!keySet.has(key) && numbers(q,r))
       items.push({part,row:cat.get(key)||{...r,original:""},change:r,past:null,pastUnknown:false,orphan:!cat.has(key)});
     return items;
   }
-  async function download(part,filter,opt={}) {
+  async function download(part,opt={}) {
     const {check,progress}=start(part,opt);
-    if(filter && !RESULTS.includes(filter))throw Error("작업결과를 다시 선택하세요.");
     await authorize(part);check();progress("선택한 파트의 작업내역 확인 중…");
     const store=await db();check();
     const docs=await store.all(part,check);check();
-    const changes=[...collectLatest(part,docs).values()].filter(r=>!filter || r.result===filter)
+    const changes=[...collectLatest(part,docs).values()]
       .sort((a,b)=>b.time-a.time || a.key.localeCompare(b.key));
     if(!changes.length)return {count:0};
     const memos=new Map(docs.filter(d=>belongs(part,d)&&memo(d)).map(d=>[d.key,text(d.memo??d.text)]));
@@ -192,24 +199,31 @@ export function createRecordService({authorize,active,api,reader=makeFirebaseRea
         ch.time?formatWorkTime(ch.time):"",notes.join("\n\n"),r?.address||ch.address,r?"":"현재 지도 데이터에 없는 기록 · 메모 연결 불가"];
     });
     progress(num(rows.length)+"건의 엑셀 생성 중…");await new Promise(resolve=>setTimeout(resolve,0));check();
-    const writer=workbook || (await import("./work-xlsx.js?v=51")).createWorkExportWorkbook;check();
+    const writer=workbook || (await import("./work-xlsx.js?v=52")).createWorkExportWorkbook;check();
     const stamp=formatWorkTime(Date.now()).replace(/[-:]/g,"").replace(" ","_");
-    return {count:rows.length,orphan,blob:writer(rows),name:"KDN_MAP_"+label+"_"+(filter||"전체변경")+"_"+stamp+".xlsx"};
+    return {count:rows.length,orphan,blob:writer(rows),name:"KDN_MAP_"+label+"_전체변경_"+stamp+".xlsx"};
   }
   async function reset(part,opt={}) {
+    const scope="status-and-memos-v2";
+    if(opt.scope!==scope)throw Error("최신 화면에서 작업 상태와 마커 메모 삭제 안내를 다시 확인하세요.");
     const {check,progress}=start(part,opt);await authorize(part,"reset");check();
-    let deleted=0,newer=0,cursor=null;const seen=new Set();
+    let statuses=0,memos=0,newer=0,cursor=null;const seen=new Set();
+    const counts=()=>"작업 상태 "+num(statuses)+"건 · 마커 메모 "+num(memos)+"건";
     try {
       do {
-        check();const p=await api("/api/status/reset",{method:"POST",body:{part,cursor}});
-        if(!Number.isSafeInteger(p?.deleted)||p.deleted<0||!Number.isSafeInteger(p.newer)||p.newer<0||
-          !(p.next===null || (typeof p.next==="string" && p.next && !seen.has(p.next))))throw Error("초기화 응답을 확인할 수 없습니다.");
-        deleted+=p.deleted;newer+=p.newer;cursor=p.next;seen.add(cursor);
-        progress("초기화 중 · "+num(deleted)+"건 삭제");
+        check();const p=await api("/api/status/reset",{method:"POST",body:{part,cursor,scope}});
+        if(p?.scope!==scope || ![p.statuses,p.memos,p.newer,p.deleted].every(n=>Number.isSafeInteger(n)&&n>=0) ||
+          p.deleted!==p.statuses+p.memos || !(p.next===null || (typeof p.next==="string" && p.next && !seen.has(p.next))))
+          throw Error("작업 상태·메모 초기화 응답을 확인할 수 없습니다. 관리 함수와 웹 파일의 버전을 확인하세요.");
+        statuses+=p.statuses;memos+=p.memos;newer+=p.newer;cursor=p.next;seen.add(cursor);
+        progress("초기화 중 · "+counts()+" 삭제");
       }while(cursor!==null);
-      return {deleted,newer};
-    }catch(e){throw Error("초기화 중단 · 서버에서 확인한 삭제 "+num(deleted)+"건. "+e.message);}
-    finally{cached=null;}
+      return {scope,deleted:statuses+memos,statuses,memos,newer};
+    }catch(e){
+      const reason=e.message==="초기화할 파트를 다시 선택하세요." && cursor===null
+        ?"메모 초기화를 지원하는 관리 함수가 배포되었는지 확인하세요 (UPDATE_RESET.cmd).":e.message;
+      throw Error("초기화 중단 · 서버에서 확인한 삭제: "+counts()+". "+reason);
+    }finally{cached.delete(part);}
   }
-  return {lookup,download,reset,clear:()=>{cached=null;}};
+  return {lookup,download,reset,clear:()=>cached.clear()};
 }

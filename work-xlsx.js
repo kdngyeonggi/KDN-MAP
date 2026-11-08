@@ -12,7 +12,7 @@ function workExcelXmlText(value) {
 }
 
 export function createWorkExportWorkbook(rows) {
-  if (rows.length > 1048575) throw new Error("엑셀 한 시트의 행 한도를 초과했습니다. 변경상태를 나눠 추출하세요.");
+  if (rows.length > 1048575) throw new Error("전체 변경내역이 엑셀 한 시트의 최대 데이터 행 수(1,048,575개)를 초과했습니다.");
   const header = ["파트", "계약번호", "계기번호", "기존상태", "작업결과", "작업자", "작업일자(한국시간)", "메모", "지번주소", "비고"];
   const xmlStart = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
   const sheetRows = [header, ...rows].map((row, index) => {
@@ -46,7 +46,7 @@ function createWorkExcelZip(files) {
     let crc = 0xffffffff;
     for (const byte of data) crc = table[(crc ^ byte) & 255] ^ (crc >>> 8);
     crc = (crc ^ 0xffffffff) >>> 0;
-    if (offset + data.length + name.length + 30 > 0xffffffff) throw new Error("엑셀 파일이 너무 큽니다. 변경상태별로 나눠 추출하세요.");
+    if (offset + data.length + name.length + 30 > 0xffffffff) throw new Error("전체 변경내역이 엑셀 파일로 생성할 수 있는 크기를 초과했습니다.");
     const local = new Uint8Array(30 + name.length), lv = new DataView(local.buffer);
     lv.setUint32(0, 0x04034b50, true); lv.setUint16(4, 20, true); lv.setUint16(6, 0x800, true);
     lv.setUint16(12, 33, true); lv.setUint32(14, crc, true);

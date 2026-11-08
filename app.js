@@ -1071,7 +1071,10 @@ function applySyncedOverrideState(next, latest, latestByUser = new Map(), nextMe
   statusChangeDetails = nextChanges;
   statusChangeDetailsReady = true;
   latestUpdatesByUser = latestByUser;
-  if (nextMemos) markerMemos = nextMemos;
+  if (nextMemos) {
+    markerMemos = nextMemos;
+    if (connected) syncClearedMarkerMemoPopup(nextMemos);
+  }
   updateFirebaseSyncState(connected ? "연결됨" : "연결안됨");
 
   if (latest && latest.groupNo) {
@@ -2843,6 +2846,19 @@ function ensureMarkerMemoPopup() {
   return popup;
 }
 
+// Clear an old displayed memo only after a confirmed server snapshot. Preserve edits the worker is still typing.
+function syncClearedMarkerMemoPopup(memos) {
+  const popup=document.getElementById("kdnMarkerMemoPopup");
+  if(!popup || popup.style.display!=="flex" || popup.dataset.memoPart!==activeWorkType ||
+     popup.dataset.hadMemo!=="1" || Object.prototype.hasOwnProperty.call(memos,popup.dataset.memoKey))return;
+  const text=popup.querySelector("#kdnMarkerMemoText"),info=popup.querySelector("[data-memo-help]");
+  if(!text || !info)return;
+  popup.dataset.hadMemo="0";
+  const draft=text.value!==text.defaultValue;
+  if(!draft){text.value="";text.defaultValue="";}
+  info.textContent=draft?"저장된 메모가 초기화되었습니다. 작성 중인 내용을 저장하면 새 메모가 됩니다.":"저장된 메모가 초기화되었습니다.";
+}
+
 function closeMarkerMemoPopup() {
   const popup = document.getElementById("kdnMarkerMemoPopup");
   if (popup) {
@@ -2865,6 +2881,8 @@ window.openMarkerMemoPopup = function(encodedGroupNo) {
   const memoKey = getMarkerMemoDocKey(group.n);
   const memo = markerMemos[memoKey] || {};
   const existingText = String(memo.text || "");
+  popup.dataset.memoPart=activeWorkType;popup.dataset.memoKey=memoKey;
+  popup.dataset.hadMemo=Object.prototype.hasOwnProperty.call(markerMemos,memoKey)?"1":"0";
   popup.innerHTML = `
     <div style="width:min(560px,100%);max-height:78vh;background:#fff;border-radius:18px;box-shadow:0 20px 60px rgba(0,0,0,.3);overflow:hidden;">
       <div style="display:flex;justify-content:space-between;align-items:center;padding:14px 16px;border-bottom:1px solid #e5e7eb;">
@@ -2872,7 +2890,7 @@ window.openMarkerMemoPopup = function(encodedGroupNo) {
         <button type="button" onclick="closeMarkerMemoPopup()" style="width:34px;height:34px;border:none;border-radius:999px;background:#f3f4f6;font-size:20px;cursor:pointer;">×</button>
       </div>
       <div style="padding:16px;">
-        <div style="font-size:12px;color:#6b7280;margin-bottom:8px;line-height:1.5;">이 메모는 현재 마커에 저장되며, 다음에 다시 열어 확인할 수 있습니다.</div>
+        <div data-memo-help role="status" style="font-size:12px;color:#6b7280;margin-bottom:8px;line-height:1.5;">이 메모는 현재 마커에 저장되며, 다음에 다시 열어 확인할 수 있습니다.</div>
         <textarea id="kdnMarkerMemoText" maxlength="2000" placeholder="이 마커에 남길 내용을 입력하세요."
           style="width:100%;min-height:180px;box-sizing:border-box;border:1px solid #d1d5db;border-radius:12px;padding:12px;resize:vertical;font-size:14px;line-height:1.6;">${escapeHtml(existingText)}</textarea>
         <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px;">

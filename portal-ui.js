@@ -96,7 +96,7 @@ export function mount(host,options){
  function permissions(){
   const gen=++seq,el=head("권한관리","관리자를 이름으로 추가하고, 관리할 파트와 사용할 도구를 지정합니다.");
   let admins=[],people=[],regions=new Set(),caps=new Set(),busy=false;const labels={upload:"엑셀업로드",workers:"작업자관리",reset:"Firebase 초기화"};
-  el.innerHTML='<div class="panes"><section class="panel"><div class="tinylabel">01 / ADMINISTRATORS</div><div class="titleline spread"><h3>관리자 명단 <span id="atotal" class="badge"></span></h3>'+btn("＋ 관리자 추가","addAdmin")+'</div>'+input("findAdmin","이름 검색",'type="search" placeholder="관리자 찾기"')+'<ul class="worklist"></ul></section><section class="panel"><div class="tinylabel">02 / PERMISSIONS</div><h3>관리자 권한 설정</h3>'+input("adminName","관리자 이름",'maxlength="45" placeholder="목록에서 선택하거나 이름 입력"')+'<p class="mini" id="astate"></p><label class="field">담당 파트 · 여러 개 선택 가능</label><div class="chips" id="aparts"></div><label class="field">추가 관리 기능</label><div class="chips" id="acaps"></div><p class="mini">Firebase 초기화를 허용하면 위에서 선택한 담당 파트의 작업 상태를 초기화할 수 있습니다. 마커 메모는 유지됩니다. 권한관리는 김우진 전용입니다.</p><hr class="line"><div class="actions">'+btn("관리자 권한 저장","saveAdmin","primary")+btn("관리자 권한 회수","revokeAdmin","danger")+'</div><div class="notice" role="status"></div></section></div>';
+  el.innerHTML='<div class="panes"><section class="panel"><div class="tinylabel">01 / ADMINISTRATORS</div><div class="titleline spread"><h3>관리자 명단 <span id="atotal" class="badge"></span></h3>'+btn("＋ 관리자 추가","addAdmin")+'</div>'+input("findAdmin","이름 검색",'type="search" placeholder="관리자 찾기"')+'<ul class="worklist"></ul></section><section class="panel"><div class="tinylabel">02 / PERMISSIONS</div><h3>관리자 권한 설정</h3>'+input("adminName","관리자 이름",'maxlength="45" placeholder="목록에서 선택하거나 이름 입력"')+'<p class="mini" id="astate"></p><label class="field">담당 파트 · 여러 개 선택 가능</label><div class="chips" id="aparts"></div><label class="field">추가 관리 기능</label><div class="chips" id="acaps"></div><p class="mini">Firebase 초기화를 허용하면 위에서 선택한 담당 파트의 작업 상태 변경값과 마커 메모를 함께 삭제할 수 있습니다. 이전 작업 로그는 유지됩니다. 권한관리는 김우진 전용입니다.</p><hr class="line"><div class="actions">'+btn("관리자 권한 저장","saveAdmin","primary")+btn("관리자 권한 회수","revokeAdmin","danger")+'</div><div class="notice" role="status"></div></section></div>';
   const field=el.querySelector("#adminName"),q=el.querySelector("#findAdmin"),msg=el.querySelector(".notice");
   const selected=()=>admins.find(r=>r.name===field.value.trim());
   function render(){
@@ -117,19 +117,15 @@ export function mount(host,options){
   action(el,"saveAdmin",()=>save("grant"));action(el,"revokeAdmin",()=>save("revoke"));field.oninput=select;q.oninput=render;
   render();if(!connected)notice(msg,"Firebase 관리 기능 연결 전입니다. 기존 명단을 표시합니다.");load().catch(e=>notice(msg,e.message,true));
  }
- function historyView(part=me.parts.length>1?"all":me.parts[0],which="any",value=""){
-  const el=head("작업내역 확인","계기번호 또는 계약번호(고객번호)로 계기별 작업결과와 마지막 작업자를 확인합니다.");
+ function historyView(){
+  const el=head("작업내역 확인","번호 하나로 담당 전체에서 계기별 작업결과와 마지막 작업자를 확인합니다.");
   const ac=new AbortController();let service,items=[],page=0,busy=false;
   cleanup=()=>{ac.abort();service?.clear();};
-  const parts=partButtons(part).replace('aria-label="파트 선택">','aria-label="파트 선택">'+(me.parts.length>1?'<button type="button" data-part="all" aria-pressed="'+(part==="all")+'">담당 전체</button>':""));
-  el.innerHTML='<section class="panel"><div class="tinylabel">WORK RECORDS</div><h3>조회할 파트</h3>'+parts+
-   '<form class="record-search"><div><label class="field" for="recordKind">검색 기준</label><select id="recordKind"><option value="any">계기번호 또는 계약번호</option><option value="meter">계기번호</option><option value="contract">계약번호(고객번호)</option></select></div>'+
-   '<div><label class="field" for="recordValue">조회할 번호</label><input id="recordValue" type="search" maxlength="120" autocomplete="off" required placeholder="앞자리 0을 포함한 전체 번호"></div><button class="primary" type="submit">조회</button></form>'+
+  el.innerHTML='<section class="panel"><div class="tinylabel">WORK RECORDS</div>'+
+   '<form class="record-search"><div><label class="field" for="recordValue">조회할 번호</label><input id="recordValue" type="search" maxlength="120" autocomplete="off" required placeholder="게기번호 또는 계약번호"></div><button class="primary" type="submit">조회</button></form>'+
    '<p class="mini">'+(options.preview?"예시 계기번호 00101 · 계약번호 000123":"같은 계약의 계기가 여러 대이면 각 계기를 따로 표시합니다.")+'</p></section>'+
    '<section class="panel record-panel" aria-label="조회 결과"><h3>조회 결과</h3><div class="notice" role="status">번호를 입력하고 조회하세요.</div><div data-results></div></section>';
-  const form=el.querySelector("form"),kind=el.querySelector("#recordKind"),val=el.querySelector("#recordValue"),msg=el.querySelector(".notice"),out=el.querySelector("[data-results]");
-  kind.value=which;val.value=value;
-  bindParts(el,p=>{cleanup();historyView(p,kind.value,val.value);});
+  const form=el.querySelector("form"),val=el.querySelector("#recordValue"),msg=el.querySelector(".notice"),out=el.querySelector("[data-results]");
   function paint(){
    out.replaceChildren();if(!items.length)return;
    const size=25, pages=Math.ceil(items.length/size);page=Math.max(0,Math.min(page,pages-1));
@@ -144,14 +140,14 @@ export function mount(host,options){
     (pages>1?'<div class="record-pages">'+btn("이전","prevPage")+'<span>'+(page+1)+' / '+pages+'</span>'+btn("다음","nextPage")+'</div>':"");
    if(pages>1){action(out,"prevPage",()=>{page--;paint();}).disabled=page===0;action(out,"nextPage",()=>{page++;paint();}).disabled=page===pages-1;}
   }
-  const clearResults=()=>{items=[];page=0;out.replaceChildren();notice(msg,"번호를 입력하고 조회하세요.");};kind.onchange=clearResults;val.oninput=clearResults;
+  const clearResults=()=>{items=[];page=0;out.replaceChildren();notice(msg,"번호를 입력하고 조회하세요.");};val.oninput=clearResults;
   form.onsubmit=async event=>{
    event.preventDefault();const value=val.value.trim();if(!value||busy)return;
    busy=true;items=[];page=0;out.replaceChildren();for(const c of form.elements)c.disabled=true;
    try {
     service=await options.records();if(ac.signal.aborted)return;
-    const errors=[];for(const p of (part==="all"?me.parts:[part])){
-      try{notice(msg,PARTS[p]+" · 조회 중…");const rows=await service.lookup(p,kind.value,value,{signal:ac.signal,progress:t=>notice(msg,PARTS[p]+" · "+t)});for(const row of rows)items.push(row);}
+    const errors=[];for(const p of me.parts){
+      try{notice(msg,PARTS[p]+" · 조회 중…");const rows=await service.lookup(p,value,{signal:ac.signal,progress:t=>notice(msg,PARTS[p]+" · "+t)});for(const row of rows)items.push(row);}
       catch(e){if(ac.signal.aborted)return;errors.push(PARTS[p]+": "+e.message);}
     }
     if(ac.signal.aborted)return;
@@ -164,24 +160,23 @@ export function mount(host,options){
   };
  }
  function workFiles(part=me.parts[0]){
-  const el=head("엑셀 다운로드","선택한 파트의 작업내역을 엑셀로 내려받습니다.");
+  const el=head("엑셀 다운로드","선택한 파트의 전체 상태변경 내역을 엑셀로 내려받습니다.");
   const allowed=has("reset"),ac=new AbortController();let busy=false,service;
   cleanup=()=>{ac.abort();service?.clear();window.removeEventListener("beforeunload",beforeLeave);};
   function beforeLeave(e){if(resetLock){e.preventDefault();e.returnValue="";}}
   el.innerHTML='<section class="panel"><h3>대상 파트</h3>'+partButtons(part)+'</section><div class="panes"><section class="panel"><div class="tinylabel">01 / EXPORT</div><h3>작업내역 엑셀</h3>'+
-   '<p class="mini">상태를 변경한 계기만 포함합니다. 계기별 마지막 작업결과와 마커의 현재 메모를 함께 내려받습니다.</p><label class="field" for="resultFilter">작업결과</label>'+
-   '<select id="resultFilter">'+["","모뎀설치","작업불가","재방문"].map(s=>'<option value="'+s+'">'+(s||"전체 변경상태")+'</option>').join("")+'</select>'+
+   '<p class="mini">상태가 변경된 모든 계기의 마지막 작업결과와 현재 마커 메모를 함께 내려받습니다.</p>'+
    btn("엑셀 다운로드","downloadWork","primary wide")+'<div id="downloadNotice" class="notice" role="status"></div></section>'+
-   (allowed?'<section class="panel reset-card"><div class="tinylabel">02 / RESET</div><h3>Firebase 초기화</h3><p>대상 파트: <b>'+esc(PARTS[part])+'</b></p><p class="mini">이 파트의 작업 상태를 최신 엑셀 기준으로 되돌립니다. 메모와 이전 작업 로그는 유지됩니다.</p>'+
-    btn(PARTS[part]+" 변경값 초기화","resetPart","danger wide")+'<div id="resetNotice" class="notice" role="status"></div></section>':"")+'</div>';
+   (allowed?'<section class="panel reset-card"><div class="tinylabel">02 / RESET</div><h3>Firebase 초기화</h3><p>대상 파트: <b>'+esc(PARTS[part])+'</b></p><p class="mini">선택한 파트의 작업 상태 변경값과 마커 메모를 함께 삭제합니다. 지도 상태는 최신 엑셀 기준으로 돌아가며 이전 작업 로그는 유지됩니다.</p>'+
+    btn(PARTS[part]+" 작업 상태·메모 초기화","resetPart","danger wide")+'<div id="resetNotice" class="notice" role="status"></div></section>':"")+'</div>';
   bindParts(el,p=>{if(!busy){cleanup();workFiles(p);}});
   const setBusy=v=>{busy=v;el.querySelectorAll("button,select").forEach(n=>n.disabled=v);};
   action(el,"downloadWork",async()=>{
-   if(busy)return;const filter=el.querySelector("#resultFilter").value,msg=el.querySelector("#downloadNotice");
+   if(busy)return;const msg=el.querySelector("#downloadNotice");
    setBusy(true);notice(msg,"작업내역 확인 중…");
    try{service=await options.records();if(ac.signal.aborted)return;
-    const f=await service.download(part,filter,{signal:ac.signal,progress:t=>notice(msg,t)});if(ac.signal.aborted)return;
-    if(!f.count){notice(msg,"선택한 조건에 해당하는 상태변경 내역이 없습니다.");return;}
+    const f=await service.download(part,{signal:ac.signal,progress:t=>notice(msg,t)});if(ac.signal.aborted)return;
+    if(!f.count){notice(msg,"이 파트에 저장된 상태변경 내역이 없습니다.");return;}
     const url=URL.createObjectURL(f.blob),a=document.createElement("a");
     try{a.href=url;a.download=f.name;document.body.append(a);a.click();}finally{a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);}
     notice(msg,num(f.count)+"건 다운로드 요청 완료"+(f.orphan?" · 현재 지도에 없는 "+num(f.orphan)+"건은 비고에 표시했습니다.":"."));
@@ -190,13 +185,14 @@ export function mount(host,options){
   action(el,"resetPart",async()=>{
    if(!allowed||busy||resetLock)return;
    const label=PARTS[part],msg=el.querySelector("#resetNotice");
-   if(!confirm(label+" 파트의 작업 상태 변경값을 초기화할까요?\n메모와 작업 로그는 보존됩니다. 필요하면 먼저 작업내역 엑셀을 내려받으세요."))return;
-   if(!confirm("정말로 "+label+" 파트만 초기화하시겠습니까? 삭제된 변경값은 복구할 수 없습니다."))return;
+   if(!confirm(label+" 파트의 작업 상태 변경값과 마커 메모를 함께 삭제할까요?\n이전 작업 로그와 다른 파트의 자료는 유지됩니다."))return;
+   if(!confirm("정말로 "+label+" 파트의 작업 상태 변경값과 마커 메모를 삭제할까요? 삭제한 메모는 복구할 수 없습니다."))return;
    resetLock=true;setBusy(true);host.querySelectorAll('[data-act="back"],[data-act="exit"]').forEach(b=>b.disabled=true);
    window.addEventListener("beforeunload",beforeLeave);notice(msg,"초기화 대상 확인 중…");
    try{service=await options.records();if(ac.signal.aborted)return;
-    const r=await service.reset(part,{signal:ac.signal,progress:t=>notice(msg,t)});if(ac.signal.aborted)return;
-    notice(msg,label+" 초기화 완료 · 변경값 "+num(r.deleted)+"건 삭제"+(r.newer?" · 초기화 도중 수정된 "+num(r.newer)+"건 유지":""));
+    const r=await service.reset(part,{scope:"status-and-memos-v2",signal:ac.signal,progress:t=>notice(msg,t)});if(ac.signal.aborted)return;
+    if(r?.scope!=="status-and-memos-v2")throw Error("처리 결과를 확인할 수 없습니다. 웹 파일과 관리 함수의 버전을 확인하세요.");
+    notice(msg,label+" 초기화 완료 · 작업 상태 "+num(r.statuses)+"건 · 마커 메모 "+num(r.memos)+"건 삭제"+(r.newer?" · 초기화 시작 후 변경된 기록 "+num(r.newer)+"건 유지":""));
    }catch(e){if(!ac.signal.aborted)notice(msg,e.message,true);}
    finally{resetLock=false;window.removeEventListener("beforeunload",beforeLeave);if(!ac.signal.aborted){setBusy(false);host.querySelectorAll('[data-act="back"],[data-act="exit"]').forEach(b=>b.disabled=false);}}
   });
