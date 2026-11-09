@@ -17,6 +17,7 @@ import {
   onSnapshot,
   setDoc,
   addDoc,
+  writeBatch,
   serverTimestamp
 } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
 
@@ -223,6 +224,12 @@ function usesLowVoltageStatuses(type = activeWorkType) {
 }
 
 const COMPLETION_STATUSES = ["모뎀설치", "작업불가", "재방문"];
+const PARTIAL_STATUS_LABELS = new Map([
+  ["모뎀설치", "모뎀설치"], ["작업불가", "설치불가"], ["재방문", "재방문"]
+]);
+const PARTIAL_STATUS_COLORS = new Map([
+  ["모뎀설치", "green"], ["작업불가", "brown"], ["재방문", "teal"]
+]);
 
 const LOW_VOLTAGE_STATUS_OPTIONS = [
   { value: "MKAMI", color: "red", icon: "🔴" },
@@ -713,6 +720,7 @@ function applyPermissionDefaults() {
 let currentGroupNo = null;
 let currentInfoOpenIndex = null;
 let infoPanel = null;
+let partialStatusPopup = null;
 
 let searchInput = null;
 let searchButton = null;
@@ -1028,11 +1036,17 @@ function applyOverrideSnapshotToState(snapshot, next, latestRef, latestByUser, n
         : 0;
 
       if (nextChanges) {
+        const pending = !!d.metadata?.hasPendingWrites;
+        const stamp = pending && !data.updatedAt && data.partialAt !== undefined
+          ? d.data({ serverTimestamps: "estimate" }) : data;
+        // Existing bulk writes merge and replace updatedAt; old partial metadata then stops applying.
+        const partial = !!stamp.updatedAt && !!stamp.partialAt?.isEqual?.(stamp.updatedAt);
         nextChanges[data.key] = {
           status: next[data.key],
           updatedByEmail,
           updatedAtMs,
-          pending: !!d.metadata?.hasPendingWrites,
+          pending,
+          partial,
           meterNo: String(data.meterNo ?? ""),
           contractNo: String(data.contractNo ?? ""),
           address: String(data.address ?? ""),
@@ -1098,6 +1112,7 @@ function applySyncedOverrideState(next, latest, latestByUser = new Map(), nextMe
 let overrideSyncGeneration = 0;
 
 function stopOverrideSync() {
+  closePartialStatusPopup();
   firebaseConnected = false;
   overrideSyncGeneration += 1;
   if (unsubscribeOverrides) unsubscribeOverrides();
@@ -1707,9 +1722,28 @@ function getOriginalRowStatus(row) {
 }
 
 function getGroupColor(group) {
-  const allStatuses = getVisibleRowEntries(group)
-    .map(({ row, index }) => normalizeComparableStatus(getRowStatus(group.n, index, row)))
-    .filter(Boolean);
+  const allStatuses = [];
+  let hasPartial = false, votes, counted;
+  for (const { row, index } of getVisibleRowEntries(group)) {
+    const key = getStableRowKey(group.n, index, row);
+    const override = statusOverrides[key];
+    const status = normalizeComparableStatus(normalizeStatus(override || row.k));
+    if (status) allStatuses.push(status);
+    if (!override || !PARTIAL_STATUS_COLORS.has(status)) continue;
+    if (!counted) { counted = new Set(); votes = new Map(); }
+    if (counted.has(key)) continue;
+    counted.add(key);
+    votes.set(status, (votes.get(status) || 0) + 1);
+    const detail = statusChangeDetails[key];
+    if (detail?.status === status && detail.partial) hasPartial = true;
+  }
+
+  if (hasPartial) {
+    const max = Math.max(...votes.values());
+    // 동률은 모뎀설치 → 작업불가(부분변경의 설치불가) → 재방문 순입니다.
+    const winner = COMPLETION_STATUSES.find(status => votes.get(status) === max);
+    return PARTIAL_STATUS_COLORS.get(winner);
+  }
 
   if (!allStatuses.length) return null;
 
@@ -2603,6 +2637,45 @@ function ensureUI() {
       .kdn-status-menu > button:hover:not(:disabled), .kdn-status-menu > button:focus-visible { background:#e0f2fe;border-color:#7dd3fc;outline:none; }
       .kdn-status-menu > button:disabled { opacity:.55;cursor:default; }
       .kdn-status-actions > .status-change-detail { flex-shrink:0;margin-left:auto;padding:6px 8px;font-size:11px; }
+      .kdn-partial-button {
+        min-height:32px;padding:0 8px;border:1px solid #0891b2;border-radius:8px;
+        color:#0e7490;background:#ecfeff;font:inherit;font-size:12px;font-weight:700;cursor:pointer;
+      }
+      .kdn-partial-button:focus-visible,.kdn-partial-dialog button:focus-visible {
+        outline:2px solid #0891b2;outline-offset:2px;
+      }
+      .kdn-partial-dialog {
+        box-sizing:border-box;width:min(640px,calc(100% - 20px));max-width:none;padding:0;
+        max-height:88dvh;border:0;border-radius:16px;background:#fff;color:#111827;
+        box-shadow:0 20px 60px rgba(0,0,0,.3);font:inherit;font-family:system-ui,sans-serif;overflow:hidden;
+      }
+      .kdn-partial-dialog::backdrop { background:rgba(15,23,42,.48); }
+      .kdn-partial-dialog form { display:flex;flex-direction:column;max-height:88dvh; }
+      .kdn-partial-head,.kdn-partial-footer { padding:12px 14px;flex-shrink:0; }
+      .kdn-partial-head { display:flex;justify-content:space-between;align-items:flex-start;gap:8px; }
+      .kdn-partial-head h2 { font-size:17px;margin:0 0 5px; }
+      .kdn-partial-head p { font-size:12px;color:#475569;margin:0; }
+      .kdn-partial-list { min-height:0;overflow:auto;overscroll-behavior:contain;padding:0 10px; }
+      .kdn-partial-list table { width:100%;border-collapse:separate;border-spacing:0;table-layout:fixed;font-size:13px; }
+      .kdn-partial-list th,.kdn-partial-list td { text-align:center;border-bottom:1px solid #e2e8f0;padding:2px; }
+      .kdn-partial-list th { position:sticky;top:0;background:#f1f5f9;padding:8px 2px; }
+      .kdn-partial-list th:first-child,.kdn-partial-list td:first-child { width:37%;text-align:left;padding:6px;overflow-wrap:anywhere; }
+      .kdn-partial-list small { display:block;color:#475569;font-size:11px; }
+      .kdn-partial-check { display:grid;place-items:center;min-height:42px;cursor:pointer; }
+      .kdn-partial-check input { width:19px;height:19px;margin:0;cursor:pointer; }
+      .kdn-partial-footer { border-top:1px solid #e2e8f0; }
+      .kdn-partial-message { font-size:12px;color:#9a3412;margin:0 0 8px; }
+      .kdn-partial-message:empty { display:none; }
+      .kdn-partial-actions { display:flex;justify-content:flex-end;gap:8px; }
+      .kdn-partial-dialog button { min-height:36px;border:1px solid #cbd5e1;border-radius:8px;padding:5px 10px;background:#fff;color:#111827;cursor:pointer;font:inherit;font-size:13px; }
+      .kdn-partial-dialog button[type="submit"] { background:#111827;color:#fff;font-weight:700; }
+      .kdn-partial-dialog button:disabled { opacity:.5;cursor:default; }
+      @media (max-width:540px) {
+        .kdn-status-actions { flex-wrap:wrap; }
+        .kdn-status-actions > .kdn-status-select { flex-basis:min(150px,42%); }
+        .kdn-status-actions > .status-change-detail { margin-left:0; }
+        .kdn-partial-list th { font-size:11px; }
+      }
       @media (max-width: 360px) {
         .kdn-status-actions { gap:4px; }
         .kdn-status-actions > button { padding:7px 6px !important;font-size:11px !important; }
@@ -3186,6 +3259,178 @@ function enhanceStatusPickers(panel) {
   });
 }
 
+function closePartialStatusPopup() {
+  const dialog = partialStatusPopup;
+  partialStatusPopup = null;
+  if (dialog?.open) dialog.close();
+  dialog?.remove();
+}
+
+function getPartialStatusEntries(group) {
+  const branches = getAllowedBranchSet();
+  const entries = new Map();
+  if (!canAccessGroup(group)) return entries;
+  for (const { row, index } of getVisibleRowEntries(group)) {
+    if (branches && !branches.has(row.branch || group.branch)) continue;
+    const status = getRowStatus(group.n, index, row);
+    if (!status || !String(row.m || "").trim()) continue;
+    const key = getStableRowKey(group.n, index, row);
+    if (!entries.has(key)) entries.set(key, { row, index, status });
+  }
+  return entries;
+}
+
+function openPartialStatusPopup(groupNo) {
+  if (partialStatusPopup?.open) return;
+  if (!currentUser) {
+    renderAuthPanel("로그인 후 상태를 변경할 수 있습니다.");
+    return;
+  }
+  const group = groupMap.get(groupNo);
+  const entries = getPartialStatusEntries(group);
+  if (!entries.size) {
+    alert("변경할 수 있는 계기가 없습니다.");
+    return;
+  }
+  closeStatusPicker();
+  const part = activeWorkType, uid = currentUser.uid;
+  const keys = [...entries.keys()];
+  const addresses = new Set([...entries.values()].map(({ row }) => getBaseAddressLabel(row.f, row.r)));
+  const dialog = document.createElement("dialog");
+  dialog.className = "kdn-partial-dialog";
+  dialog.setAttribute("aria-labelledby", "kdnPartialStatusTitle");
+  dialog.innerHTML = `
+    <form>
+      <header class="kdn-partial-head">
+        <div><h2 id="kdnPartialStatusTitle">계기별 상태 변경</h2><p>선택한 계기만 변경됩니다.</p></div>
+        <button type="button" data-close aria-label="닫기" autofocus>×</button>
+      </header>
+      <div class="kdn-partial-list">
+        <table><thead><tr><th scope="col">계기번호</th>
+          ${[...PARTIAL_STATUS_LABELS.values()].map(label => `<th scope="col">${label}</th>`).join("")}
+        </tr></thead><tbody>
+        ${keys.map((key, i) => {
+          const { row, status } = entries.get(key);
+          const meter = escapeHtml(row.m);
+          const address = addresses.size > 1 ? getBaseAddressLabel(row.f, row.r) : "";
+          return `<tr><td><strong>${meter}</strong>
+            <small data-current>현재: ${escapeHtml(PARTIAL_STATUS_LABELS.get(status) || status)}</small>
+            ${address ? `<small>${escapeHtml(address)}</small>` : ""}</td>
+            ${[...PARTIAL_STATUS_LABELS].map(([value, label]) => `<td>
+              <label class="kdn-partial-check"><input type="checkbox" data-row="${i}"
+                value="${value}" aria-label="${meter} ${label}" style="accent-color:${getMarkerFill(PARTIAL_STATUS_COLORS.get(value))}"></label>
+            </td>`).join("")}</tr>`;
+        }).join("")}
+        </tbody></table>
+      </div>
+      <footer class="kdn-partial-footer">
+        <p class="kdn-partial-message" role="status"></p>
+        <div class="kdn-partial-actions">
+          <button type="button" data-close>취소</button>
+          <button type="submit" disabled>변경 저장</button>
+        </div>
+      </footer>
+    </form>`;
+  document.body.appendChild(dialog);
+  partialStatusPopup = dialog;
+  const form = dialog.querySelector("form"), save = form.querySelector('[type="submit"]');
+  const message = dialog.querySelector(".kdn-partial-message");
+  const checks = [...dialog.querySelectorAll("input[data-row]")];
+  const closeButtons = [...dialog.querySelectorAll("[data-close]")];
+  const chosen = () => checks.filter(box => box.checked);
+  let saving = false;
+  const syncSaveButton = () => {
+    const count = chosen().length;
+    save.disabled = saving || !count;
+    save.textContent = saving ? "저장 중…" : count ? `${count.toLocaleString("ko-KR")}대 변경 저장` : "변경 저장";
+  };
+  closeButtons.forEach(button => button.onclick = closePartialStatusPopup);
+  dialog.addEventListener("cancel", event => { if (saving) event.preventDefault(); });
+  dialog.addEventListener("close", () => {
+    if (partialStatusPopup === dialog) closePartialStatusPopup();
+  });
+  form.addEventListener("change", event => {
+    const box = event.target;
+    if (!box.matches("input[data-row]")) return;
+    if (box.checked) {
+      box.closest("tr").querySelectorAll("input").forEach(other => { if (other !== box) other.checked = false; });
+    }
+    syncSaveButton();
+  });
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (saving) return;
+    const selected = chosen();
+    if (!selected.length) return;
+    if (navigator.onLine === false) {
+      message.textContent = "인터넷 연결 후 다시 저장해 주세요.";
+      return;
+    }
+    const edits = new Map(selected.map(box => [keys[Number(box.dataset.row)], box.value]));
+    if (edits.size !== selected.length || [...edits.values()].some(value => !PARTIAL_STATUS_LABELS.has(value))) return;
+    const isCurrent = () => partialStatusPopup === dialog && currentUser?.uid === uid && activeWorkType === part;
+    let saved = 0;
+    saving = true;
+    [...checks, ...closeButtons].forEach(el => el.disabled = true);
+    syncSaveButton();
+    message.textContent = "";
+    try {
+      const changes = [...edits];
+      // Each account's original access checks and per-meter document identities still apply.
+      const currentEntries = () => {
+        if (!isCurrent()) throw Error("session-changed");
+        const current = groupMap.get(groupNo);
+        const allowed = getPartialStatusEntries(current);
+        return { current, allowed };
+      };
+      const initial = currentEntries();
+      if (changes.some(([key]) => !initial.allowed.has(key))) throw Error("scope-changed");
+      for (let offset = 0; offset < changes.length; offset += 100) {
+        const { current, allowed } = offset === 0 ? initial : currentEntries();
+        const chunk = changes.slice(offset, offset + 100);
+        if (chunk.some(([key]) => !allowed.has(key))) throw Error("scope-changed");
+        const batch = writeBatch(db);
+        for (const [key, status] of chunk) {
+          const { row, index } = allowed.get(key);
+          const updatedAt = serverTimestamp();
+          const record = {
+            key, status, updatedAt,
+            groupNo: String(row.statusGroupNo ?? groupNo),
+            branch: String(row.branch || current.branch || ""),
+            rowIndex: Number(row.statusRowIndex ?? index),
+            meterNo: String(row.m || ""), contractNo: String(row.c || ""), address: String(row.f || ""),
+            ...(part === "reinforcement" ? {} : { workType: part }),
+            updatedByUid: uid, updatedByEmail: currentUser.email || ""
+          };
+          batch.set(doc(db, "statusOverrides", safeDocId(key)), {
+            ...record, partialAt: updatedAt
+          }, { merge: true });
+          batch.set(doc(collection(db, "statusLogs")), record);
+        }
+        await batch.commit();
+        if (!isCurrent()) return;
+        for (const box of selected.slice(offset, offset + chunk.length)) {
+          box.checked = false;
+          box.closest("tr").querySelector("[data-current]").textContent = "현재: " + PARTIAL_STATUS_LABELS.get(box.value);
+        }
+        saved += chunk.length;
+      }
+      closePartialStatusPopup();
+    } catch (error) {
+      if (!isCurrent()) return;
+      message.textContent = (saved ? `${saved}대 저장 완료. ` : "") +
+        (error.message === "scope-changed" ? "계기 정보 또는 권한이 바뀌었습니다. 창을 닫고 다시 열어 주세요."
+          : "남은 계기를 저장하지 못했습니다. Firebase 권한과 연결을 확인해 주세요.");
+    } finally {
+      if (isCurrent()) {
+        saving = false;
+        [...checks, ...closeButtons].forEach(el => el.disabled = false);
+        syncSaveButton();
+      }
+    }
+  });
+  dialog.showModal();
+}
 
 function renderInfo(group) {
   closeStatusPicker();
@@ -3279,6 +3524,7 @@ function renderInfo(group) {
             style="height:32px;border:1px solid #d1d5db;border-radius:8px;padding:0 8px;font-size:12px;background:#fff;color:${uniqueStatuses.length === 1 ? getStatusTextColor(currentStatus) : "#374151"};">
             ${statusOptionsHtml}
           </select>
+          <button type="button" class="kdn-partial-button" aria-haspopup="dialog">부분변경</button>
           ${isAdminUser() ? renderStatusChangeDetails(getBucketStatusChange(group, bucket)) : ""}
         </div>
 
@@ -3324,6 +3570,9 @@ function renderInfo(group) {
   `;
   panel.style.display = "flex";
   enhanceStatusPickers(panel);
+  panel.querySelectorAll(".kdn-partial-button").forEach(button => {
+    button.onclick = () => openPartialStatusPopup(group.n);
+  });
 }
 
 window.changeGroupedStatus = async function(groupNo, indexList, value) {

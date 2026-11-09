@@ -24,7 +24,10 @@ function memo(d) { return d.kind==="markerMemo" || d.key.startsWith("markerMemo|
 function record(part,d) {
   if(!belongs(part,d) || memo(d) || typeof d.status!=="string") return null;
   const ms=d.updatedAt?.toMillis?.() || 0;
-  return {key:d.key, when:ms?formatWorkTime(ms).slice(0,16):"기록 없음", result:currentStatus(part,d.status), worker:displayWorker(d.updatedByEmail),
+  const status=currentStatus(part,d.status);
+  // Match the partial-change popup without renaming existing bulk records or wire values.
+  const result=status==="작업불가" && d.updatedAt && d.partialAt?.isEqual?.(d.updatedAt) ? "설치불가" : status;
+  return {key:d.key, when:ms?formatWorkTime(ms).slice(0,16):"기록 없음", result, worker:displayWorker(d.updatedByEmail),
     time:ms, meter:text(d.meterNo), contract:text(d.contractNo),
     address:text(d.address), branch:text(d.branch)};
 }

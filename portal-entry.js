@@ -40,7 +40,7 @@ onAuthStateChanged(auth,async user=>{
    if(me.role==="admin" && new URLSearchParams(location.search).get("view")!=="map"){
      let recordsPromise;
      const active=()=>auth.currentUser?.uid===user.uid && window.KDN_CONTEXT?.uid===user.uid && !blocked;
-     const records=()=>recordsPromise || (recordsPromise=import("./admin-records.js?v=memo-reset-v52").then(mod=>mod.createRecordService({
+     const records=()=>recordsPromise || (recordsPromise=import("./admin-records.js?v=partial-status-v53").then(mod=>mod.createRecordService({
        api,active,authorize:async(part,cap)=>{
          if(!active() || !me.parts.includes(part))throw Error("담당 파트의 관리자만 조회할 수 있습니다.");
          const fresh=await api("/api/me");
@@ -54,7 +54,7 @@ onAuthStateChanged(auth,async user=>{
       window.KDN_CONTEXT.roster=(await api("/api/workers")).workers;
      }
      await mapSdk();if(n!==serial)return;host.hidden=true;document.querySelector("#map").hidden=false;document.body.classList.add("map-screen");
-     await import("./app.js?v=memo-reset-v52");
+     await import("./app.js?v=partial-status-v53");
    }
  }catch(e){if(!blocked)fail(e);}
 });
