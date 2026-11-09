@@ -1676,6 +1676,12 @@ function getRowStatus(groupNo, idx, row) {
   return normalizeStatus(statusOverrides[key] || row.k || "");
 }
 
+function getInfoRowEntries(group) {
+  // 상세 목록과 보강공사 마커 숫자는 저장된 작업 상태까지 포함해 같은 기준으로 셉니다.
+  return getVisibleRowEntries(group).filter(({ row, index }) =>
+    normalizeComparableStatus(getRowStatus(group.n, index, row)));
+}
+
 function getRowStatusChange(groupNo, idx, row) {
   if (!statusChangeDetailsReady) return undefined;
   const key = getStableRowKey(groupNo, idx, row);
@@ -1909,8 +1915,7 @@ function hasCompletedNonMkamiRow(group) {
 function getGroupMarkerImage(group, color, selected = group.n === selectedMarkerGroupNo) {
   const threePhase = groupHasThreePhase(group);
   if (activeWorkType === "reinforcement") {
-    // 분할 데이터는 rows.length에 전체 계기 수를 보존합니다.
-    return getMarkerImage(color, selected, String(group.rows?.length || 0), threePhase ? "triangle" : "circle");
+    return getMarkerImage(color, selected, String(getInfoRowEntries(group).length), threePhase ? "triangle" : "circle");
   }
   const label = threePhase ? "3" : "";
   if (activeWorkType === "low_voltage") {
@@ -3450,12 +3455,7 @@ function renderInfo(group) {
   const buckets = [];
   const bucketMap = new Map();
 
-  getVisibleRowEntries(group).forEach(({ row: r, index: i }) => {
-    const rowStatus = normalizeComparableStatus(getRowStatus(group.n, i, r));
-
-    // 현재상태가 빈칸인 행은 정보확인에서 제외
-    if (!rowStatus) return;
-
+  getInfoRowEntries(group).forEach(({ row: r, index: i }) => {
     const key = String(r.addressGroupKey || normalizeAddressGroupKey(r.f, r.r) || `__empty_${i}`);
     if (!bucketMap.has(key)) {
       bucketMap.set(key, {

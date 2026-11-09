@@ -54,7 +54,7 @@ onAuthStateChanged(auth,async user=>{
       window.KDN_CONTEXT.roster=(await api("/api/workers")).workers;
      }
      await mapSdk();if(n!==serial)return;host.hidden=true;document.querySelector("#map").hidden=false;document.body.classList.add("map-screen");
-     await import("./app.js?v=partial-status-v53");
+     await import("./app.js?v=marker-meter-count-v54");
    }
  }catch(e){if(!blocked)fail(e);}
 });
