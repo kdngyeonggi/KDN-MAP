@@ -225,7 +225,7 @@ function usesLowVoltageStatuses(type = activeWorkType) {
 
 const COMPLETION_STATUSES = ["모뎀설치", "작업불가", "재방문"];
 const PARTIAL_STATUS_LABELS = new Map([
-  ["모뎀설치", "모뎀설치"], ["작업불가", "설치불가"], ["재방문", "재방문"]
+  ["모뎀설치", "모뎀설치"], ["작업불가", "작업불가"], ["재방문", "재방문"]
 ]);
 const PARTIAL_STATUS_COLORS = new Map([
   ["모뎀설치", "green"], ["작업불가", "brown"], ["재방문", "teal"]
@@ -1746,7 +1746,7 @@ function getGroupColor(group) {
 
   if (hasPartial) {
     const max = Math.max(...votes.values());
-    // 동률은 모뎀설치 → 작업불가(부분변경의 설치불가) → 재방문 순입니다.
+    // 동률은 모뎀설치 → 작업불가 → 재방문 순입니다.
     const winner = COMPLETION_STATUSES.find(status => votes.get(status) === max);
     return PARTIAL_STATUS_COLORS.get(winner);
   }
