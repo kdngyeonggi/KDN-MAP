@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>KDN MAP · 검침 검색 시험</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f3f6fa;color:#162942;font:16px/1.55 system-ui,sans-serif}main{max-width:680px;margin:7vh auto;padding:24px}section{background:white;border:1px solid #dce3eb;border-radius:16px;padding:25px}h1{line-height:1.2;margin:.3em 0}.tag{font-size:.83rem;font-weight:700;color:#275b91}label{display:block;font-weight:700}input{width:100%;font:inherit;padding:10px;border:1px solid #70849a;border-radius:8px;margin:6px 0 14px}button{padding:10px 16px;border:0;border-radius:8px;background:#174c80;color:white;font:inherit;font-weight:700;cursor:pointer}button:disabled{opacity:.6;cursor:default}li{margin:.35em 0;overflow-wrap:anywhere}a{color:#174c80}#status{min-height:1.5em}.fail{color:#a12727}.pass{color:#175939}
+</style>
+</head>
+<body>
+<main><section>
+<div class="tag">KDN MAP · 가상 자료</div>
+<h1>검침 검색 시험</h1>
+<p>기존 KDN MAP 로그인으로 가상 자료의 계약번호, 계기번호, 모뎀 MAC, DCU ID 검색을 확인합니다.</p>
+<form id="trial">
+<label for="worker">내 Cloudflare Worker 주소</label>
+<input id="worker" type="url" inputmode="url" required placeholder="https://kdn-map-lookup.…workers.dev/" autocomplete="off" spellcheck="false" aria-describedby="help">
+<p id="help">Cloudflare의 kdn-map-lookup 화면에서 Visit을 눌러 열린 주소를 복사하세요.</p>
+<button id="run" disabled>검색 4가지 시험</button>
+</form>
+<p id="status" role="status" aria-live="polite">KDN MAP 로그인 확인 중…</p>
+<ol id="results"></ol>
+<p><a href="./index.html">KDN MAP 돌아가기</a></p>
+</section></main>
+<script type="module">
+import { FIREBASE_CONFIG } from "./portal-config.js";
+import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
+import { getAuth } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-auth.js";
+
+const SITE = "https://kdngyeonggi.github.io";
+const form = document.querySelector("#trial");
+const field = document.querySelector("#worker");
+const button = document.querySelector("#run");
+const status = document.querySelector("#status");
+const results = document.querySelector("#results");
+const setStatus = (message, type = "") => {
+  status.textContent = message;
+  status.className = type;
+};
+
+function workerAddress(raw) {
+  let url;
+  try { url = new URL(raw.trim()); } catch {}
+  if (!url || url.protocol !== "https:" || url.port || url.username || url.password ||
+      !/^kdn-map-lookup\.[a-z0-9-]+\.workers\.dev$/.test(url.hostname) ||
+      url.pathname !== "/" || url.search || url.hash)
+    throw Error("Cloudflare의 Visit으로 열린 kdn-map-lookup 기본 주소를 그대로 붙여 넣으세요.");
+  return url.origin;
+}
+
+const checks = [
+  {label:"계약번호 000001",kind:"contract",key:"000001",meters:["000101"]},
+  {label:"계기번호 000103",kind:"meter",key:"000103",meters:["000103"]},
+  {label:"모뎀 MAC 001A02BC",kind:"mac",key:"001A02BC",meters:["000101","000102"],
+   extra:r=>r.dcu_connections?.length===1 && r.dcu_connections[0].dcu==="000D01" &&
+            r.dcu_connections[0].dcu_state==="정상" && r.rows.every(x=>x.reading==="검침실패")},
+  {label:"DCU ID 000D01",kind:"dcu",key:"000D01",meters:["000101","000102"],
+   extra:r=>r.dcu_state==="정상"},
+];
+
+async function runCheck(endpoint, token, check) {
+  const res = await fetch(endpoint + "/search", {
+    method:"POST", redirect:"error", cache:"no-store", credentials:"omit",
+    headers:{Authorization:"Bearer "+token,"Content-Type":"application/json"},
+    body:JSON.stringify({kind:check.kind,key:check.key}),
+  });
+  if (res.status===401) throw Error("로그인이 만료됐어요. KDN MAP에 다시 로그인하세요.");
+  if (res.status===403) throw Error("현재 계정에 조회 권한이 없어요.");
+  if (!res.ok) throw Error("Worker가 검색에 응답하지 않았어요. Visit에서 KDN SAMPLE READY를 확인하세요.");
+  const result=await res.json();
+  if (result.pilot !== true || !Array.isArray(result.rows) ||
+      JSON.stringify(result.rows.map(r=>r.meter))!==JSON.stringify(check.meters) ||
+      (check.extra && !check.extra(result))) throw Error("예상 샘플과 결과가 달라요: "+check.label);
+  return result.rows.map(r=>r.meter+" · "+r.reading).join(", ") +
+    (check.kind==="mac" || check.kind==="dcu" ? " / DCU 000D01 · 정상" : "");
+}
+
+async function setup() {
+  if (location.origin !== SITE) {
+    setStatus("파일을 직접 열지 말고, GitHub에 올린 뒤 KDN MAP 주소에서 열어 주세요.", "fail");
+    return;
+  }
+  const auth = getAuth(initializeApp(FIREBASE_CONFIG));
+  await auth.authStateReady();
+  if (!auth.currentUser) {
+    setStatus("같은 브라우저에서 KDN MAP에 먼저 로그인한 뒤 이 페이지를 다시 열어 주세요.", "fail");
+    return;
+  }
+  setStatus("KDN MAP 로그인 확인 완료. Worker 주소를 넣고 시험을 시작하세요.", "pass");
+  button.disabled=false;
+  form.addEventListener("submit",async event=>{
+    event.preventDefault();
+    button.disabled=true;
+    results.replaceChildren();
+    try {
+      const endpoint=workerAddress(field.value);
+      setStatus("가상 자료를 검색 중이에요…");
+      const health=await fetch(endpoint+"/",{redirect:"error",cache:"no-store",credentials:"omit"});
+      if (!health.ok || (await health.json()).status!=="KDN SAMPLE READY")
+        throw Error("Worker의 Visit 화면에서 KDN SAMPLE READY가 나오는지 확인하세요.");
+      const token=await auth.currentUser?.getIdToken();
+      if (!token) throw Error("KDN MAP에 다시 로그인하세요.");
+      for(const check of checks) {
+        const value=await runCheck(endpoint,token,check);
+        const item=document.createElement("li");
+        item.textContent=check.label+": 성공 — "+value;
+        results.append(item);
+      }
+      setStatus("검색 4가지 성공", "pass");
+    } catch (error) {
+      setStatus(error instanceof TypeError?"Worker에 연결하지 못했어요. Visit 주소와 배포 상태를 확인하세요.":error.message,"fail");
+    } finally { button.disabled=false; }
+  });
+}
+setup().catch(()=>setStatus("KDN MAP 로그인을 불러오지 못했어요. 같은 브라우저에서 다시 로그인한 뒤 새로고침하세요.", "fail"));
+</script>
+</body>
+</html>
