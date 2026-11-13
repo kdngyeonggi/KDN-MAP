@@ -1,7 +1,7 @@
 import {API_BASE,FIREBASE_CONFIG,MAP_SDK} from "./portal-config.js?v=map-key-v50";
 import {initializeApp} from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
 import {getAuth,onAuthStateChanged,signOut} from "https://www.gstatic.com/firebasejs/11.0.0/firebase-auth.js";
-import {mount} from "./portal-ui.js?v=memo-reset-v52";
+import {mount} from "./portal-ui.js?v=pages-publish-v56";
 const auth=getAuth(initializeApp(FIREBASE_CONFIG)),host=document.querySelector("#portal");
 const idleKey="kdn_last_activity_at_v1",timeout=10800000;let serial=0,uid=null,blocked=false,rechecking=false,stamp="";
 const base=API_BASE.replace(/\/$/,"");
