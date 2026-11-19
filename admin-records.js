@@ -36,6 +36,41 @@ function collectLatest(part,docs) {
   for(const d of docs){const r=record(part,d);if(r && (!map.has(r.key) || map.get(r.key).time<r.time))map.set(r.key,r);}
   return map;
 }
+export function markerCounts(part,cat,docs){
+ const changes=collectLatest(part,docs),groups=new Map();
+ for(const row of cat.values())for(const id of row.groups){
+  if(!groups.has(id))groups.set(id,[]);
+  groups.get(id).push(row);
+ }
+ const partialKeys=new Set();
+ for(const d of docs){
+  if(!record(part,d))continue;
+  if(d.partialAt && d.updatedAt && d.partialAt.isEqual?.(d.updatedAt))partialKeys.add(d.key);
+ }
+ const counts=Object.fromEntries(RESULTS.map(k=>[k,0]));
+ for(const rows of groups.values()){
+  const votes=new Map(),statuses=[],seen=new Set();let partial=false,changed=false;
+  for(const row of rows){
+   if(seen.has(row.key))continue;seen.add(row.key);
+   const ch=changes.get(row.key),status=ch?.result||row.original;
+   if(status)statuses.push(status);
+   if(ch && RESULTS.includes(ch.result)){
+    changed=true;votes.set(ch.result,(votes.get(ch.result)||0)+1);
+    if(partialKeys.has(row.key))partial=true;
+   }
+  }
+  if(!changed)continue;
+  let result;
+  if(partial){
+   const max=Math.max(...votes.values());
+   result=RESULTS.find(k=>votes.get(k)===max);
+  }else if(statuses.length && statuses.every(k=>RESULTS.includes(k))){
+   result=statuses.includes("작업불가")?"작업불가":statuses.includes("재방문")?"재방문":"모뎀설치";
+  }
+  if(result)counts[result]++;
+ }
+ return counts;
+}
 function chunks(a,size=30) {return Array.from({length:Math.ceil(a.length/size)},(_,i)=>a.slice(i*size,(i+1)*size));}
 function fileFor(part,name) {
   const prefix=PART_INFO[part][1];
@@ -109,6 +144,16 @@ export async function makeFirebaseReader() {
     return (await Promise.all(refs.map(c=>read(status,c,check)))).flat().filter(d=>belongs(part,d));
   }
   return {
+    watch(part,check,onData,onError){
+      check();
+      return f.onSnapshot(f.query(status,...scope(part)),{includeMetadataChanges:true},snap=>{
+        try{
+          check();
+          if(snap.metadata.fromCache || snap.metadata.hasPendingWrites)return;
+          onData(snap.docs.map(d=>d.data()).filter(d=>belongs(part,d)&&!memo(d)));
+        }catch(e){onError(e);}
+      },onError);
+    },
     all:(part,check)=>partDocs(part,true,check),
     async matched(part,needles,known,check) {
       const docs=[],keys=new Set();
@@ -181,6 +226,32 @@ export function createRecordService({authorize,active,api,reader=makeFirebaseRea
       items.push({part,row:cat.get(key)||{...r,original:""},change:r,past:null,pastUnknown:false,orphan:!cat.has(key)});
     return items;
   }
+  async function listChanges(part,opt={}) {
+    const {check,progress}=start(part,opt);
+    await authorize(part);check();progress("선택한 파트의 작업내역 확인 중…");
+    const store=await db();check();
+    const docs=await store.all(part,check);check();
+    const changes=[...collectLatest(part,docs).values()]
+      .sort((a,b)=>b.time-a.time || a.key.localeCompare(b.key));
+    if(!changes.length)return {count:0,markers:[],orphan:0};
+    const memos=new Map(docs.filter(d=>belongs(part,d)&&memo(d)).map(d=>[d.key,text(d.memo??d.text)]));
+    const cat=await catalog(part,opt,check,progress);
+    let orphan=0;
+    const markers=new Map();
+    for(const ch of changes){
+      const row=cat.get(ch.key),ids=row?.groups?.length?row.groups:[null];
+      if(!row)orphan++;
+      for(const id of ids){
+        const key=id===null?"missing:"+ch.key:"marker:"+id;
+        if(!markers.has(key))markers.set(key,{id:key,address:row?.address||ch.address||"주소 정보 없음",
+          branch:row?.branch||ch.branch,orphan:!row,time:0,items:[],memo:id===null?"":memos.get(markerMemoKey(part,id))||""});
+        const marker=markers.get(key);marker.time=Math.max(marker.time,ch.time);
+        marker.items.push({...ch,meter:row?.meter??ch.meter,contract:row?.contract??ch.contract,
+          original:row?row.original:"확인 불가"});
+      }
+    }
+    return {count:changes.length,orphan,markers:[...markers.values()].sort((a,b)=>b.time-a.time||a.id.localeCompare(b.id))};
+  }
   async function download(part,opt={}) {
     const {check,progress}=start(part,opt);
     await authorize(part);check();progress("선택한 파트의 작업내역 확인 중…");
@@ -225,5 +296,16 @@ export function createRecordService({authorize,active,api,reader=makeFirebaseRea
       throw Error("초기화 중단 · 서버에서 확인한 삭제: "+counts()+". "+reason);
     }finally{cached.delete(part);}
   }
-  return {lookup,download,reset,clear:()=>cached.clear()};
+  async function watchCounts(part,opt={}){
+    const {check,progress}=start(part,opt);await authorize(part);check();
+    const cat=await catalog(part,opt,check,progress),store=await db();check();
+    let unsubscribe=()=>{},stopped=false;
+    const stop=()=>{if(stopped)return;stopped=true;unsubscribe();opt.signal?.removeEventListener("abort",stop);};
+    unsubscribe=store.watch(part,check,docs=>{
+      if(stopped)return;check();opt.onData?.(markerCounts(part,cat,docs));
+    },e=>{if(!stopped)opt.onError?.(e);});
+    if(opt.signal?.aborted)stop();else opt.signal?.addEventListener("abort",stop,{once:true});
+    return stop;
+  }
+  return {lookup,listChanges,download,reset,watchCounts,clear:()=>cached.clear()};
 }

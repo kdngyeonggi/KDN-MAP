@@ -172,7 +172,7 @@ export function mount(host,options){
  function historyView(){
   const el=head("작업내역 확인","번호 하나로 담당 전체에서 계기별 작업결과와 마지막 작업자를 확인합니다.");
   const ac=new AbortController();let service,items=[],page=0,busy=false;
-  cleanup=()=>{ac.abort();service?.clear();};
+  cleanup=()=>{ac.abort();stopCounts?.();service?.clear();};
   el.innerHTML='<section class="panel"><div class="tinylabel">WORK RECORDS</div>'+
    '<form class="record-search"><div><label class="field" for="recordValue">조회할 번호</label><input id="recordValue" type="search" maxlength="120" autocomplete="off" required placeholder="게기번호 또는 계약번호"></div><button class="primary" type="submit">조회</button></form>'+
    '<p class="mini">'+(options.preview?"예시 계기번호 00101 · 계약번호 000123":"같은 계약의 계기가 여러 대이면 각 계기를 따로 표시합니다.")+'</p></section>'+
@@ -213,16 +213,40 @@ export function mount(host,options){
  }
  function workFiles(part=me.parts[0]){
   const el=head("엑셀 다운로드","선택한 파트의 전체 상태변경 내역을 엑셀로 내려받습니다.");
-  const allowed=has("reset"),ac=new AbortController();let busy=false,service;
-  cleanup=()=>{ac.abort();service?.clear();window.removeEventListener("beforeunload",beforeLeave);};
+  const allowed=has("reset"),ac=new AbortController();let busy=false,service,stopCounts;
+  cleanup=()=>{ac.abort();stopCounts?.();service?.clear();window.removeEventListener("beforeunload",beforeLeave);};
   function beforeLeave(e){if(resetLock){e.preventDefault();e.returnValue="";}}
   el.innerHTML='<section class="panel"><h3>대상 파트</h3>'+partButtons(part)+'</section><div class="panes"><section class="panel"><div class="tinylabel">01 / EXPORT</div><h3>작업내역 엑셀</h3>'+
    '<p class="mini">상태가 변경된 모든 계기의 마지막 작업결과와 현재 마커 메모를 함께 내려받습니다.</p>'+
    btn("엑셀 다운로드","downloadWork","primary wide")+'<div id="downloadNotice" class="notice" role="status"></div></section>'+
    (allowed?'<section class="panel reset-card"><div class="tinylabel">02 / RESET</div><h3>Firebase 초기화</h3><p>대상 파트: <b>'+esc(PARTS[part])+'</b></p><p class="mini">선택한 파트의 작업 상태 변경값과 마커 메모를 함께 삭제합니다. 지도 상태는 최신 엑셀 기준으로 돌아가며 이전 작업 로그는 유지됩니다.</p>'+
+    '<div aria-label="현재 마커 변경현황" style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:18px 0">'+
+    [["모뎀설치","#247445"],["작업불가","#86603e"],["재방문","#167a80"]].map(([name,color])=>
+      '<div style="background:#f4f7f6;border-radius:10px;padding:12px 6px;text-align:center"><span style="font-size:13px">'+name+'</span><strong data-count="'+name+'" style="display:block;font-size:24px;color:'+color+'">—</strong><span style="font-size:12px">건</span></div>').join("")+
+    '</div><div id="countsNotice" class="mini" role="status">실시간 현황을 연결하는 중…</div>'+
     btn(PARTS[part]+" 작업 상태·메모 초기화","resetPart","danger wide")+'<div id="resetNotice" class="notice" role="status"></div></section>':"")+'</div>';
   bindParts(el,p=>{if(!busy){cleanup();workFiles(p);}});
   const setBusy=v=>{busy=v;el.querySelectorAll("button,select").forEach(n=>n.disabled=v);};
+  if(allowed)void(async()=>{
+   const msg=el.querySelector("#countsNotice");
+   const unknown=()=>el.querySelectorAll("[data-count]").forEach(n=>n.textContent="—");
+   try{
+    service=await options.records();if(ac.signal.aborted)return;
+    stopCounts=await service.watchCounts(part,{signal:ac.signal,
+      progress:t=>{msg.textContent=t;},
+      onData:counts=>{
+        if(ac.signal.aborted)return;
+        for(const n of el.querySelectorAll("[data-count]"))n.textContent=num(counts[n.dataset.count]);
+        msg.textContent="실시간 연결됨 · 마커 기준";
+      },
+      onError:()=>{
+        if(ac.signal.aborted)return;unknown();
+        msg.textContent="실시간 연결을 확인할 수 없습니다. 페이지를 다시 열어 주세요.";
+      }
+    });
+    if(ac.signal.aborted)stopCounts();
+   }catch(e){if(!ac.signal.aborted){unknown();msg.textContent="현황을 불러오지 못했습니다. "+e.message;}}
+  })();
   action(el,"downloadWork",async()=>{
    if(busy)return;const msg=el.querySelector("#downloadNotice");
    setBusy(true);notice(msg,"작업내역 확인 중…");
