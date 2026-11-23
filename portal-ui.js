@@ -67,9 +67,9 @@ export function mount(host,options){
   const rule=gate("upload");let file=null,converted=null,ticket="",busy=false,worker=null,closed=false,pending=null,watch=null;
   const done=()=>{closed=true;watch?.abort();if(worker)worker.terminate();window.removeEventListener("beforeunload",leaving);};cleanup=done;
   function leaving(e){if(busy){e.preventDefault();e.returnValue="";}}window.addEventListener("beforeunload",leaving);
-  el.innerHTML='<div class="panes"><section class="panel"><div class="tinylabel">01 / SOURCE</div><h3>반영할 파트</h3>'+partButtons(part)+'<hr class="line"><h3>단일 시트 엑셀</h3>'+drop("mapFile",false)+'<p class="mini">선택 파트: '+PARTS[part]+' · 원본 엑셀은 이 브라우저에서 처리됩니다.</p>'+btn("엑셀 검사 · 미리보기","check","primary wide")+'</section><section class="panel"><div class="tinylabel">02 / REVIEW</div><h3>반영 내용</h3><div id="stats">파일을 검사하면 반영 건수를 확인할 수 있습니다.</div><div class="notice" role="status"></div>'+btn("지도에 반영","apply","primary wide")+'</section></div>';
-  const msg=el.querySelector(".notice"),stats=el.querySelector("#stats"),check=action(el,"check",inspect),apply=action(el,"apply",publish);
-  function controls(){check.disabled=!!rule||busy||!file;apply.disabled=!!rule||busy||!converted;el.querySelector("input").disabled=busy;el.querySelectorAll("[data-part]").forEach(b=>b.disabled=busy);}
+  el.innerHTML='<div class="panes"><section class="panel"><div class="tinylabel">01 / SOURCE</div><h3>반영할 파트</h3>'+partButtons(part)+'<hr class="line"><h3>단일 시트 엑셀</h3>'+drop("mapFile",false)+'<p class="mini">선택 파트: '+PARTS[part]+' · 원본 엑셀은 이 브라우저에서 처리됩니다.</p>'+btn("엑셀 검사 · 미리보기","check","primary wide")+'</section><section class="panel"><div class="tinylabel">02 / REVIEW</div><h3>반영 내용</h3><div id="stats">파일을 검사하면 반영 건수를 확인할 수 있습니다.</div><div class="notice" role="status"></div>'+btn("지도에 반영","apply","primary wide")+'<hr class="line">'+btn("리스트 지우기","clearList","danger wide")+'</section></div>';
+  const msg=el.querySelector(".notice"),stats=el.querySelector("#stats"),check=action(el,"check",inspect),apply=action(el,"apply",publish),clear=action(el,"clearList",clearList);
+  function controls(){clear.disabled=!!rule||busy||!!options.preview;check.disabled=!!rule||busy||!file;apply.disabled=!!rule||busy||!converted;el.querySelector("input").disabled=busy;el.querySelectorAll("[data-part]").forEach(b=>b.disabled=busy);}
   const retry=document.createElement("button");retry.type="button";retry.className="sub";retry.textContent="배포 상태 다시 확인";retry.hidden=true;msg.after(retry);
   function resetWatch(){watch?.abort();watch=null;pending=null;retry.hidden=true;}
   retry.onclick=()=>{if(pending&&!watch)void verifyDeployment();};
@@ -84,12 +84,12 @@ export function mount(host,options){
      try{matches=await deployedMapMatches(check.name,check.expected,AbortSignal.any([signal,AbortSignal.timeout(8000)]));}catch{}
      if(signal.aborted)return;
      if(matches){
-      notice(msg,label+(check.changed?" · 새로운 리스트 적용 완료":" · 기존 리스트와 동일하며 지도에 적용되어 있습니다."));
+      notice(msg,label+(check.clear?" · 리스트 지우기 완료":check.changed?" · 새로운 리스트 적용 완료":" · 기존 리스트와 동일하며 지도에 적용되어 있습니다."));
       return;
      }
      await delayCheck(10000,signal);
     }
-    if(!signal.aborted){notice(msg,label+" · 저장소에는 반영됐지만 지도 배포는 아직 확인되지 않았습니다. 엑셀을 다시 올리지 말고 배포 상태를 다시 확인하세요.");retry.hidden=false;}
+    if(!signal.aborted){notice(msg,label+" · 저장소에는 반영됐지만 지도 배포는 아직 확인되지 않았습니다. 배포 상태를 다시 확인하세요.");retry.hidden=false;}
    }finally{if(watch===controller)watch=null;}
   }
   function setfile(f,err){if(busy)return;resetWatch();file=f[0]||null;converted=null;ticket="";stats.textContent="파일을 검사하면 반영 건수를 확인할 수 있습니다.";notice(msg,err||rule);controls();}
@@ -103,6 +103,23 @@ export function mount(host,options){
     stats.innerHTML=kv([["선택 파트",PARTS[part]],["입력 시트",t.source_sheet],["반영 계기",num(t.rows)],["마커",num(t.groups)],["좌표 제외",num(t.skipped_no_coord)],["중복 제외",num(t.removed_priority_duplicates)],["계기번호 등 누락",num(t.skipped_no_id)],["데이터 파일",num(t.tiles)]]);
     notice(msg,"검사 완료. 아직 지도는 바뀌지 않았습니다.");
    }catch(e){if(!closed)notice(msg,e.message,true);}finally{worker?.terminate();worker=null;busy=false;if(!closed)controls();}
+  }
+  async function clearList(){
+   if(busy||rule||options.preview||!confirm(PARTS[part]+" 파트의 지도 리스트를 모두 지울까요?\n배포가 끝나면 이 파트에 작업 마커가 표시되지 않습니다.\n다른 파트와 Firebase 작업 기록·메모는 유지됩니다."))return;
+   resetWatch();busy=true;converted=null;ticket="";controls();
+   stats.textContent="선택한 파트의 지도 리스트를 비웁니다.";
+   try{
+    notice(msg,"선택한 파트의 최신 목록을 확인하는 중…");
+    const base=await api("/api/publish/preview",{method:"POST",body:{part}});
+    if(closed)return;
+    notice(msg,"선택한 파트의 지도 리스트를 비우는 중…");
+    const result=await api("/api/publish/clear",{method:"POST",body:{part,confirmPart:part,ticket:base.ticket}});
+    if(closed)return;
+    if(result?.name!==INDEX_NAMES[part]||!/^[0-9a-f]{64}$/.test(result.expected||""))
+     throw Error("리스트 삭제 결과를 확인하지 못했습니다.");
+    pending={name:result.name,expected:result.expected,changed:result.changed,clear:true};void verifyDeployment();
+   }catch(e){if(!closed)notice(msg,e.message==="메뉴 경로를 찾을 수 없습니다."?"관리 함수 업데이트를 먼저 적용하세요.":e.message,true);}
+   finally{busy=false;if(!closed)controls();}
   }
   async function publish(){
    if(busy||rule||!converted||!confirm(PARTS[part]+" "+num(converted.report.rows)+"건을 지도에 반영할까요?"))return;

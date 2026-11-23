@@ -1,7 +1,7 @@
 import {API_BASE,FIREBASE_CONFIG,MAP_SDK} from "./portal-config.js?v=map-key-v50";
 import {initializeApp} from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
 import {getAuth,onAuthStateChanged,signOut} from "https://www.gstatic.com/firebasejs/11.0.0/firebase-auth.js";
-import {mount} from "./portal-ui.js?v=live-marker-counts-v58";
+import {mount} from "./portal-ui.js?v=clear-map-list-v59";
 const auth=getAuth(initializeApp(FIREBASE_CONFIG)),host=document.querySelector("#portal");
 const idleKey="kdn_last_activity_at_v1",timeout=10800000;let serial=0,uid=null,blocked=false,rechecking=false,stamp="";
 const base=API_BASE.replace(/\/$/,"");
@@ -40,7 +40,7 @@ onAuthStateChanged(auth,async user=>{
    if(me.role==="admin" && new URLSearchParams(location.search).get("view")!=="map"){
      let recordsPromise;
      const active=()=>auth.currentUser?.uid===user.uid && window.KDN_CONTEXT?.uid===user.uid && !blocked;
-     const records=()=>recordsPromise || (recordsPromise=import("./admin-records.js?v=live-marker-counts-v58").then(mod=>mod.createRecordService({
+     const records=()=>recordsPromise || (recordsPromise=import("./admin-records.js?v=clear-map-list-v59").then(mod=>mod.createRecordService({
        api,active,authorize:async(part,cap)=>{
          if(!active() || !me.parts.includes(part))throw Error("담당 파트의 관리자만 조회할 수 있습니다.");
          const fresh=await api("/api/me");
