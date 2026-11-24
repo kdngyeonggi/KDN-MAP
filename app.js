@@ -1,5 +1,6 @@
 import { stableRowKey, safeDocId, markerMemoKey, displayWorker as getDisplayUserId, formatWorkTime as formatStatusChangeTime } from "./work-keys.js?v=51";
 import { RESTRICTED_ACCOUNT_MESSAGE, isTemporarilyRestrictedUser } from "./account-access.js?v=admin-portal-v46";
+import { createWorkerViewport } from "./worker-viewport.js?v=nav-resume-v60";
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
 import {
   getAuth,
@@ -1323,6 +1324,7 @@ function initAuthSync() {
     const desiredWorkType = getUserAssignedWorkType(getCurrentUserId());
     const workTypeChangedAfterLogin = activeWorkType !== desiredWorkType;
     activeWorkType = desiredWorkType;
+    workerViewport.select(getWorkerViewportKey());
     hideAuthPanel();
     firebaseReady = true;
     startInactivityLogout();
@@ -2444,6 +2446,7 @@ async function reloadActiveWorkTypeData() {
 async function switchWorkType(type) {
   if (!WORK_TYPES[type] || type === activeWorkType) return;
   if (!canAccessWorkType(type)) return;
+  workerViewport.save();
   stopOverrideSync();
 
   closeInfo();
@@ -2452,6 +2455,7 @@ async function switchWorkType(type) {
   removeAdminWorkerLocationButtons();
 
   activeWorkType = type;
+  workerViewport.select(getWorkerViewportKey());
   tileMeta = [];
   branchMeta = [];
   loadedTiles = new Map();
@@ -4218,13 +4222,42 @@ async function onBranchChange() {
 }
 
 
+let workerViewport;
+
+function getWorkerViewportKey(uid = currentUser?.uid) {
+  const context = window.KDN_CONTEXT;
+  return uid && context?.uid === uid && context.me?.role === "worker" &&
+    !context.me.blocked && context.me.parts?.includes(activeWorkType)
+    ? `kdn_worker_viewport_v1:${encodeURIComponent(uid)}:${activeWorkType}` : null;
+}
+
 function init() {
   ensureInfoPanel();
 
-  map = new kakao.maps.Map(document.getElementById("map"), {
-    center: new kakao.maps.LatLng(DEFAULT_CENTER.lat, DEFAULT_CENTER.lng),
-    level: DEFAULT_LEVEL
+  workerViewport = createWorkerViewport({
+    read: key => localStorage.getItem(key),
+    write: (key, value) => localStorage.setItem(key, value),
+    key: getWorkerViewportKey,
+    capture: () => {
+      const center = map.getCenter();
+      return { lat: center.getLat(), lng: center.getLng(), level: map.getLevel() };
+    },
+    restore: ({ lat, lng, level }) => {
+      map.setLevel(level);
+      map.setCenter(new kakao.maps.LatLng(lat, lng));
+    }
   });
+  const initialKey = getWorkerViewportKey(window.KDN_CONTEXT?.uid);
+  const saved = workerViewport.read(initialKey);
+  map = new kakao.maps.Map(document.getElementById("map"), {
+    center: new kakao.maps.LatLng(saved?.lat ?? DEFAULT_CENTER.lat, saved?.lng ?? DEFAULT_CENTER.lng),
+    level: saved?.level ?? DEFAULT_LEVEL
+  });
+  workerViewport.seed(initialKey);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) workerViewport.save();
+  });
+  window.addEventListener("pagehide", workerViewport.save);
 
   Promise.all([
     fetchJsonFresh(resolveDataFile("tiles_index.json")),
@@ -4239,7 +4272,11 @@ function init() {
 
   // Stop drawing an obsolete viewport while the user pans or changes zoom.
   kakao.maps.event.addListener(map, "bounds_changed", () => { markerRenderGeneration += 1; });
-  kakao.maps.event.addListener(map, "idle", debounce(refresh, 120));
+  const refreshAfterIdle = debounce(refresh, 120);
+  kakao.maps.event.addListener(map, "idle", () => {
+    workerViewport.save();
+    refreshAfterIdle();
+  });
 }
 
 init();

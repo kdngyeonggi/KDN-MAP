@@ -189,7 +189,7 @@ export function mount(host,options){
  function historyView(){
   const el=head("작업내역 확인","번호 하나로 담당 전체에서 계기별 작업결과와 마지막 작업자를 확인합니다.");
   const ac=new AbortController();let service,items=[],page=0,busy=false;
-  cleanup=()=>{ac.abort();stopCounts?.();service?.clear();};
+  cleanup=()=>{ac.abort();service?.clear();};
   el.innerHTML='<section class="panel"><div class="tinylabel">WORK RECORDS</div>'+
    '<form class="record-search"><div><label class="field" for="recordValue">조회할 번호</label><input id="recordValue" type="search" maxlength="120" autocomplete="off" required placeholder="게기번호 또는 계약번호"></div><button class="primary" type="submit">조회</button></form>'+
    '<p class="mini">'+(options.preview?"예시 계기번호 00101 · 계약번호 000123":"같은 계약의 계기가 여러 대이면 각 계기를 따로 표시합니다.")+'</p></section>'+
@@ -291,6 +291,11 @@ export function mount(host,options){
   });
  }
 
- function route(){if(resetLock){if(location.hash!=="#workfiles")history.replaceState(null,"","#workfiles");return;}++seq;cleanup();cleanup=()=>{};const h=location.hash.slice(1);if(h==="history")historyView();else if(h==="workfiles")workFiles();else if(h==="upload")upload();else if(h==="workers")workers();else if(h==="permissions"&&me.owner)permissions();else home();}
+ function route(){
+  if(resetLock){if(location.hash!=="#workfiles")history.replaceState(null,"","#workfiles");return;}
+  ++seq;const leave=cleanup;cleanup=()=>{};
+  try{leave();}catch(error){console.error("이전 관리자 화면 정리 실패",error);}
+  const h=location.hash.slice(1);if(h==="history")historyView();else if(h==="workfiles")workFiles();else if(h==="upload")upload();else if(h==="workers")workers();else if(h==="permissions"&&me.owner)permissions();else home();
+ }
  window.addEventListener("hashchange",route);route();
 }

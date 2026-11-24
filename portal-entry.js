@@ -1,7 +1,7 @@
 import {API_BASE,FIREBASE_CONFIG,MAP_SDK} from "./portal-config.js?v=map-key-v50";
 import {initializeApp} from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
 import {getAuth,onAuthStateChanged,signOut} from "https://www.gstatic.com/firebasejs/11.0.0/firebase-auth.js";
-import {mount} from "./portal-ui.js?v=clear-map-list-v59";
+import {mount} from "./portal-ui.js?v=nav-resume-v60";
 const auth=getAuth(initializeApp(FIREBASE_CONFIG)),host=document.querySelector("#portal");
 const idleKey="kdn_last_activity_at_v1",timeout=10800000;let serial=0,uid=null,blocked=false,rechecking=false,stamp="";
 const base=API_BASE.replace(/\/$/,"");
@@ -54,7 +54,7 @@ onAuthStateChanged(auth,async user=>{
       window.KDN_CONTEXT.roster=(await api("/api/workers")).workers;
      }
      await mapSdk();if(n!==serial)return;host.hidden=true;document.querySelector("#map").hidden=false;document.body.classList.add("map-screen");
-     await import("./app.js?v=work-unavailable-v55");
+     await import("./app.js?v=nav-resume-v60");
    }
  }catch(e){if(!blocked)fail(e);}
 });
