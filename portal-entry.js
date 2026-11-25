@@ -1,7 +1,8 @@
 import {API_BASE,FIREBASE_CONFIG,MAP_SDK} from "./portal-config.js?v=map-key-v50";
 import {initializeApp} from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
 import {getAuth,onAuthStateChanged,signOut} from "https://www.gstatic.com/firebasejs/11.0.0/firebase-auth.js";
-import {mount} from "./portal-ui.js?v=nav-resume-v60";
+import {mount} from "./portal-ui.js?v=part-notices-v61";
+import {noticeSession,confirmLoginNotices} from "./login-notice.js?v=part-notices-v61";
 const auth=getAuth(initializeApp(FIREBASE_CONFIG)),host=document.querySelector("#portal");
 const idleKey="kdn_last_activity_at_v1",timeout=10800000;let serial=0,uid=null,blocked=false,rechecking=false,stamp="";
 const base=API_BASE.replace(/\/$/,"");
@@ -33,8 +34,10 @@ onAuthStateChanged(auth,async user=>{
  if(uid && uid!==user.uid){location.replace("index.html");return;}uid=user.uid;
  if(expired()){await logout();return;}if(!localStorage.getItem(idleKey))localStorage.setItem(idleKey,String(Date.now()));
  try{
-   const name=(user.email||"").replace(/@kdn\.local$/i,"").replace(/\s+/g,"").normalize("NFC");
-   const ctx={me:await api("/api/me"),roster:null};if(n!==serial)return;
+   const session=noticeSession(user.uid,(await user.getIdTokenResult()).authTime);
+   if(n!==serial)return;
+   const {notices,...profile}=await api(session.checked()?"/api/me":"/api/me?notices=1");
+   const ctx={me:profile,roster:null};if(n!==serial)return;
    const me=ctx.me;if(me.blocked){await logout(true);return;}if(!me.parts?.length)throw Error("아직 배정된 파트가 없습니다. 관리자에게 문의하세요.");
    window.KDN_CONTEXT={...ctx,uid:user.uid};stamp=JSON.stringify(me);
    if(me.role==="admin" && new URLSearchParams(location.search).get("view")!=="map"){
@@ -50,6 +53,11 @@ onAuthStateChanged(auth,async user=>{
      })).catch(e=>{recordsPromise=null;throw e;}));
      mount(host,{me,api,records,connected:!!base,baseline:ctx.roster||[],baselineAdmins:ctx.admins||[],logout:()=>logout(),openMap:()=>location.assign("index.html?view=map")});
    }else{
+     if(me.role==="worker"&&Array.isArray(notices)&&!session.checked()){
+       await confirmLoginNotices(host,notices);
+       if(n!==serial||auth.currentUser?.uid!==user.uid||blocked)return;
+       session.markChecked();
+     }
      if(base&&me.role==="admin"){
       window.KDN_CONTEXT.roster=(await api("/api/workers")).workers;
      }

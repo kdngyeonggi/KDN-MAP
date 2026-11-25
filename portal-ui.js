@@ -2,6 +2,7 @@ const PARTS={reinforcement:"보강공사",low_voltage:"저압",high_voltage:"고
 const REGIONS=["1권역","2권역","3권역","4권역","5권역"];
 const menus=[
  ["map","지도","지도에서 계기를 확인하고 현장 작업을 관리해요.","FIELD MAP","mapc",'<path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3zm6-3v15m6-12v15"/>'],
+ ["notices","공지사항","담당 파트 작업자에게 로그인 공지를 전달해요.","FIELD NOTICE","uplc",'<path d="M4 10v4h4l9 5V5l-9 5zm4 4 2 5M20 9l2-2m-2 8 2 2"/>'],
  ["history","작업내역 확인","계기번호·계약번호로 작업결과와 작업자를 확인해요.","WORK RECORDS","histc",'<circle cx="10" cy="10" r="6"/><path d="m15 15 6 6M7 10h6m-6 3h3"/>'],
  ["workfiles","엑셀 다운로드","파트별 변경내역을 내려받고 작업 상태를 관리해요.","WORK EXPORT","filec",'<path d="M5 3h10l4 4v14H5zM14 3v5h5m-7 3v6m-3-3 3 3 3-3"/>'],
  ["upload","엑셀업로드","파트별 엑셀을 검사하고 지도 자료를 갱신해요.","MAP DATA","uplc",'<path d="M6 3h8l4 4v5M6 3v17h8M14 3v5h5m-2 13v-7m-3 3 3-3 3 3"/>'],
@@ -62,6 +63,52 @@ export function mount(host,options){
  action(root,"back",()=>change("home"));return root.querySelector("#content");}
  function partButtons(part){return '<div class="chips" aria-label="파트 선택">'+me.parts.map(p=>'<button type="button" data-part="'+p+'" aria-pressed="'+(part===p)+'">'+esc(PARTS[p])+'</button>').join("")+'</div>';}
  function bindParts(el,fn){el.querySelectorAll("[data-part]").forEach(b=>b.onclick=()=>fn(b.dataset.part));}
+ function notices(part=me.parts[0]){
+  const el=head("공지사항","담당 파트의 작업자가 로그인 후 지도를 열 때 볼 공지를 관리합니다.");
+  const gen=++seq,alive=()=>seq===gen;
+  let current=null,busy=false;
+  el.innerHTML='<section class="panel"><h3>대상 파트</h3>'+partButtons(part)+
+   '</section><section class="panel notice-editor"><div class="tinylabel">FIELD NOTICE</div><h3>'+esc(PARTS[part])+' 공지사항</h3>'+
+   '<p class="mini">파트별로 공지 한 건을 게시할 수 있습니다. 새 공지를 게시하면 기존 공지가 교체됩니다.</p>'+
+   '<form>'+input("noticeTitle","제목",'maxlength="100" required')+
+   '<label class="field" for="noticeText">내용</label><textarea id="noticeText" rows="7" maxlength="2000" required></textarea>'+
+   '<div class="actions"><button class="primary" type="submit">공지 게시</button>'+btn("게시 내리기","unpublish","danger")+btn("다시 불러오기","reload")+
+   '</div></form><p data-posted class="mini"></p><div class="notice" role="status"></div></section>';
+  const title=el.querySelector("#noticeTitle"),body=el.querySelector("#noticeText"),form=el.querySelector("form"),post=form.querySelector('[type="submit"]'),msg=el.querySelector(".notice"),posted=el.querySelector("[data-posted]");
+  const remove=action(el,"unpublish",()=>void save("unpublish")),reload=action(el,"reload",()=>void load());
+  function controls(){
+   title.disabled=body.disabled=post.disabled=busy||!current;
+   remove.disabled=busy||!current?.notice;
+   reload.disabled=busy||!connected;
+   el.querySelectorAll("[data-part]").forEach(b=>b.disabled=busy);
+  }
+  function populate(row){
+   current=row;title.value=row.notice?.title||"";body.value=row.notice?.text||"";
+   posted.textContent=row.notice?"현재 공지가 게시 중입니다.":"현재 게시 중인 공지가 없습니다.";
+  }
+  async function load(){
+   if(!connected){notice(msg,"Firebase 관리 기능 연결을 확인하세요.",true);return;}
+   busy=true;controls();notice(msg,"공지사항을 불러오는 중…");
+   try{const row=await api("/api/notices?part="+encodeURIComponent(part));if(alive()){populate(row);notice(msg,"");}}
+   catch(e){if(alive())notice(msg,e.message,true);}
+   finally{busy=false;if(alive())controls();}
+  }
+  async function save(kind){
+   if(busy||!current||!alive())return;
+   const titleText=title.value.trim(),bodyText=body.value.trim();
+   if(kind==="publish"&&(!titleText||!bodyText)){notice(msg,"제목과 내용을 모두 입력하세요.",true);return;}
+   if(kind==="unpublish"&&!window.confirm(PARTS[part]+" 공지 게시를 내릴까요?"))return;
+   busy=true;controls();notice(msg,"저장 중…");
+   try{
+    const row=await api("/api/notices",{method:"POST",body:{part,version:current.version,action:kind,...(kind==="publish"?{title:titleText,text:bodyText}:{})}});
+    if(alive()){populate(row);notice(msg,kind==="publish"?"공지사항을 게시했습니다.":"공지 게시를 내렸습니다.");}
+   }catch(e){if(alive())notice(msg,e.message,true);}
+   finally{busy=false;if(alive())controls();}
+  }
+  form.onsubmit=e=>{e.preventDefault();void save("publish");};
+  bindParts(el,p=>{if(!busy&&p!==part)notices(p);});
+  controls();void load();
+ }
  function upload(part=me.parts[0]){
   const el=head("엑셀업로드","파트를 선택하고 엑셀을 검사한 뒤, 확인한 데이터만 지도에 반영합니다.");
   const rule=gate("upload");let file=null,converted=null,ticket="",busy=false,worker=null,closed=false,pending=null,watch=null;
@@ -295,7 +342,7 @@ export function mount(host,options){
   if(resetLock){if(location.hash!=="#workfiles")history.replaceState(null,"","#workfiles");return;}
   ++seq;const leave=cleanup;cleanup=()=>{};
   try{leave();}catch(error){console.error("이전 관리자 화면 정리 실패",error);}
-  const h=location.hash.slice(1);if(h==="history")historyView();else if(h==="workfiles")workFiles();else if(h==="upload")upload();else if(h==="workers")workers();else if(h==="permissions"&&me.owner)permissions();else home();
+  const h=location.hash.slice(1);if(h==="notices")notices();else if(h==="history")historyView();else if(h==="workfiles")workFiles();else if(h==="upload")upload();else if(h==="workers")workers();else if(h==="permissions"&&me.owner)permissions();else home();
  }
  window.addEventListener("hashchange",route);route();
 }
