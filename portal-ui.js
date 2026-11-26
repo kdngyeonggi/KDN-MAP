@@ -141,7 +141,7 @@ export function mount(host,options){
   }
   function setfile(f,err){if(busy)return;resetWatch();file=f[0]||null;converted=null;ticket="";stats.textContent="파일을 검사하면 반영 건수를 확인할 수 있습니다.";notice(msg,err||rule);controls();}
   bindFiles(el,setfile);bindParts(el,p=>{done();upload(p);});
-  function convert(){return new Promise((resolve,reject)=>{worker=new Worker(new URL("./excel-worker.js?v=47",location.href));worker.onmessage=({data})=>{if(closed)return;if(data.type==="status")notice(msg,data.text);else if(data.type==="done")resolve(data);else if(data.type==="error")reject(Error(data.text));};worker.onerror=()=>reject(Error("엑셀 변환기를 시작하지 못했습니다."));worker.postMessage({file,part});});}
+  function convert(){return new Promise((resolve,reject)=>{worker=new Worker(new URL("./excel-worker.js?v=reinforcement-columns-v63",location.href));worker.onmessage=({data})=>{if(closed)return;if(data.type==="status")notice(msg,data.text);else if(data.type==="done")resolve(data);else if(data.type==="error")reject(Error(data.text));};worker.onerror=()=>reject(Error("엑셀 변환기를 시작하지 못했습니다."));worker.postMessage({file,part});});}
   async function inspect(){
    if(busy||rule)return;resetWatch();busy=true;converted=null;controls();
    try{if(!file||!file.name.toLowerCase().endsWith(".xlsx"))throw Error(".xlsx 파일을 선택하세요.");if(options.preview)throw Error("화면 미리보기에서는 실제 엑셀을 처리하지 않습니다.");

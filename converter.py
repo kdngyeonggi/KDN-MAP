@@ -37,6 +37,9 @@ EXTRA_COLS = [
     "검침원", "검침원연락처", "요청사항", "모뎀맥"
 ]
 
+# Fixed 0-based columns for the reinforcement detail display: C, D, N, O.
+REINFORCEMENT_POLE_COLUMNS = {"inflowName": 2, "inflowNo": 3, "poleTransformerNo": 13, "o": 14}
+
 
 def excel_display_string(cell):
     """엑셀 셀을 화면에 보이는 형태에 가깝게 문자열로 변환합니다."""
@@ -422,6 +425,10 @@ def convert_sheet(ws, sheet_name, config):
     address_col_name = "지번주소" if "지번주소" in header_map else "주소"
 
     missing = [c for c in BASE_REQUIRED_COLS if c not in header_map]
+    if work_type == "reinforcement":
+        missing = [c for c in missing if c not in {"변대전산화", "변대주명"}]
+        if len(headers) <= max(REINFORCEMENT_POLE_COLUMNS.values()):
+            missing.append("C·D·N·O열(인입주명·인입주전산화번호·변대전산화번호·변대주명)")
     if include_extra:
         extra_columns = (["계약전력", "용도"] + EXTRA_COLS[2:]
                          if work_type == "high_voltage" else EXTRA_COLS)
@@ -516,6 +523,14 @@ def convert_sheet(ws, sheet_name, config):
             "k": status,
             "m": meter_no
         }
+
+        if work_type == "reinforcement":
+            for field, index in REINFORCEMENT_POLE_COLUMNS.items():
+                value = excel_display_string(row[index] if index < len(row) else None)
+                # Keep n2 and statusGroupNo intact for existing Firebase record keys.
+                # Omit the separate display value only if n2 already represents N.
+                if field != "poleTransformerNo" or value != transformer_code:
+                    row_data[field] = value
 
         # 보강공사만: 엑셀의 실제 P열에 '3상'이 있으면 마커용 플래그만 추가합니다.
         # 기존 필드/표시/상태 로직은 변경하지 않습니다.

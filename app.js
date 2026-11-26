@@ -847,6 +847,24 @@ function getCommonInfoValue(rows, field, address = false) {
   return [...new Set(values.filter(Boolean))].join(" / ");
 }
 
+function getReinforcementPoleInfo(rows, legacyGroupNo) {
+  const number = v => {
+    const s = String(v ?? "").trim();
+    return /^[–—-]$/.test(s) ? "" : s;
+  };
+  const actualPole = v => {
+    const s = number(v);
+    // Older converters used the pole number itself as statusGroupNo when available.
+    return /^(?:COORD|METER|CONTRACT|ROW):/i.test(s) ? "" : s;
+  };
+  const unique = values => [...new Set(values.filter(Boolean))].join(" / ");
+  return {
+    inflowNo: unique(rows.map(row => row.inflowNo == null ? actualPole(row.statusGroupNo) : number(row.inflowNo))) ||
+      (rows.every(row => row.inflowNo == null) ? actualPole(legacyGroupNo) : ""),
+    transformerNo: unique(rows.map(row => number(row.poleTransformerNo ?? row.n2)))
+  };
+}
+
 function showsContractNumbers() {
   return activeWorkType === "low_voltage" || activeWorkType === "high_voltage";
 }
@@ -3478,6 +3496,10 @@ function renderInfo(group) {
     const first = bucket.rows[0] || {};
     const address = escapeHtml(getBaseAddressLabel(first.f, first.r) || "주소 없음");
     const commonValue = (field, isAddress = false) => getCommonInfoValue(bucket.rows, field, isAddress);
+    const legacyGroupNo = group.grouping !== "coordinate-v1" ? group.n : "";
+    const poleInfo = activeWorkType === "reinforcement" ? getReinforcementPoleInfo(bucket.rows, legacyGroupNo) : null;
+    const inflowNoLabel = poleInfo ? "인입주전산화번호" : "인입주번호";
+    const transformerNoLabel = poleInfo ? "변대전산화번호" : "변대전산화";
     const statusList = bucket.indices.map(idx => String(getRowStatus(group.n, idx, rows[idx]) || "").trim()).filter(Boolean);
     const uniqueStatuses = [...new Set(statusList)];
     const currentStatus = uniqueStatuses.length ? uniqueStatuses[0] : "";
@@ -3536,10 +3558,10 @@ function renderInfo(group) {
           style="display:${open};margin-top:8px;padding:10px;border:1px solid #e5e7eb;border-radius:10px;background:#fff;font-size:12px;line-height:1.6;word-break:break-word;">
           <div class="common-meter-info">
             ${infoRowWithCopy("인입주명", commonValue("inflowName") || group.b || "-", "인입주명")}
-            ${infoRowWithCopy("인입주번호", commonValue("inflowNo") || (group.grouping !== "coordinate-v1" ? group.n : "") || "-", "인입주번호")}
+            ${infoRowWithCopy(inflowNoLabel, (poleInfo?.inflowNo ?? (commonValue("inflowNo") || legacyGroupNo)) || "-", inflowNoLabel)}
             ${infoRowWithCopy("지번주소", commonValue("f", true) || "-", "지번주소")}
             ${infoRowWithCopy("도로명주소", commonValue("r", true) || "-", "도로명주소")}
-            ${infoRowWithCopy("변대전산화", commonValue("n2") || "-", "변대전산화")}
+            ${infoRowWithCopy(transformerNoLabel, (poleInfo?.transformerNo ?? commonValue("n2")) || "-", transformerNoLabel)}
             ${infoRowWithCopy("변대주명", commonValue("o") || "-", "변대주명")}
             ${commonValue("j") ? `<div style="margin-bottom:10px;"><strong>비고:</strong> ${escapeHtml(commonValue("j"))}</div>` : ""}
           </div>
