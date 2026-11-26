@@ -39,12 +39,14 @@ EXTRA_COLS = [
 
 # Fixed 0-based columns for the reinforcement detail display: C, D, N, O.
 REINFORCEMENT_POLE_COLUMNS = {"inflowName": 2, "inflowNo": 3, "poleTransformerNo": 13, "o": 14}
-REINFORCEMENT_POLE_LAYOUT = "C-D-N-O-v65"
+REINFORCEMENT_POLE_LAYOUT = "sheet-detail-v66"
+REINFORCEMENT_DETAIL_COLUMNS = {"B": 1, "C": 2, "D": 3, "G": 6, "H": 7, "I": 8, "J": 9,
+                                "M": 12, "N": 13, "O": 14}
 
 
 def reinforcement_pole_preview(groups, headers):
-    fields = tuple(REINFORCEMENT_POLE_COLUMNS)
-    counts = dict.fromkeys(fields, 0)
+    fields = tuple(REINFORCEMENT_DETAIL_COLUMNS)
+    counts = [0] * len(fields)
     samples = []
     total = 0
     for group in groups:
@@ -52,16 +54,16 @@ def reinforcement_pole_preview(groups, headers):
             if not row["k"]:
                 continue
             total += 1
-            for field in fields:
-                counts[field] += row[field] not in {"", "-", "–", "—"}
+            for i, value in enumerate(row["sheetDetail"]):
+                counts[i] += value not in {"", "-", "–", "—"}
             if len(samples) < 3:
-                samples.append({field: row[field][:160] for field in fields})
+                samples.append({field: value[:160] for field, value in zip(fields, row["sheetDetail"])})
     return {
         "layout": REINFORCEMENT_POLE_LAYOUT,
         "total": total,
         "columns": [
-            {"field": field, "heading": str(headers[index] or "")[:100], "filled": counts[field]}
-            for field, index in REINFORCEMENT_POLE_COLUMNS.items()
+            {"field": field, "heading": "" if headers[index] is None else str(headers[index]), "filled": counts[i]}
+            for i, (field, index) in enumerate(REINFORCEMENT_DETAIL_COLUMNS.items())
         ],
         "samples": samples,
     }
@@ -465,6 +467,12 @@ def convert_sheet(ws, sheet_name, config):
     prefix = config.get("prefix", "")
 
     headers, header_map = get_header_map(ws)
+    if work_type == "reinforcement" and len(headers) > max(REINFORCEMENT_DETAIL_COLUMNS.values()):
+        for name, column in (("계약번호", "B"), ("공동주택명", "I"), ("상호명", "J"), ("계기번호", "M")):
+            header_map.setdefault(name, REINFORCEMENT_DETAIL_COLUMNS[column])
+        if "주소" not in header_map and "지번주소" not in header_map and not find_road_col(header_map):
+            header_map["지번주소"] = REINFORCEMENT_DETAIL_COLUMNS["G"]
+            header_map["도로명주소"] = REINFORCEMENT_DETAIL_COLUMNS["H"]
     road_col_name = find_road_col(header_map)
     lat_col, lng_col, coordinate_source = find_coordinate_columns(headers)
     address_col_name = "지번주소" if "지번주소" in header_map else "주소"
@@ -472,8 +480,8 @@ def convert_sheet(ws, sheet_name, config):
     missing = [c for c in BASE_REQUIRED_COLS if c not in header_map]
     if work_type == "reinforcement":
         missing = [c for c in missing if c not in {"변대전산화", "변대주명"}]
-        if len(headers) <= max(REINFORCEMENT_POLE_COLUMNS.values()):
-            missing.append("C·D·N·O열(인입주명·인입주전산화번호·변대전산화번호·변대주명)")
+        if len(headers) <= max(REINFORCEMENT_DETAIL_COLUMNS.values()):
+            missing.append("상세정보 열(B·C·D·G·H·I·J·M·N·O)")
     if include_extra:
         extra_columns = (["계약전력", "용도"] + EXTRA_COLS[2:]
                          if work_type == "high_voltage" else EXTRA_COLS)
@@ -570,6 +578,10 @@ def convert_sheet(ws, sheet_name, config):
         }
 
         if work_type == "reinforcement":
+            row_data["sheetDetail"] = [
+                excel_display_string(row[i] if i < len(row) else None)
+                for i in REINFORCEMENT_DETAIL_COLUMNS.values()
+            ]
             for field, index in REINFORCEMENT_POLE_COLUMNS.items():
                 # Keep n2 and statusGroupNo intact for existing Firebase record keys.
                 # Always write the display field, even when N is blank.
@@ -676,6 +688,9 @@ def convert_sheet(ws, sheet_name, config):
         index_data.update({"workType": work_type, "sheet": sheet_name})
     else:
         index_data["reinforcementPoleLayout"] = REINFORCEMENT_POLE_LAYOUT
+        index_data["sheetDetailHeadings"] = [
+            "" if headers[i] is None else str(headers[i]) for i in REINFORCEMENT_DETAIL_COLUMNS.values()
+        ]
     write_json_file(os.path.join(output_dir, f"{prefix}tiles_index.json"), index_data)
     write_json_file(os.path.join(output_dir, f"{prefix}branches.json"), branch_meta)
 

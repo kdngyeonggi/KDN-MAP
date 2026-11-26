@@ -179,6 +179,7 @@ const STORAGE_KEY = "kdn_status_overrides_v1";
 const MEMO_STORAGE_KEY = "kdn_marker_memos_v1";
 let reinforcementTileVersion = "";
 let reinforcementTileHashes = new Map();
+let reinforcementSheetHeadings = null;
 const reinforcementTileFailures = new Set();
 
 function withDataVersion(file) {
@@ -203,8 +204,12 @@ function installTileIndex(data) {
   tileMeta = data.tiles || [];
   reinforcementTileVersion = activeWorkType === "reinforcement" && /^[a-f0-9]{64}$/.test(data.kdnPublishDigest || "")
     ? data.kdnPublishDigest : "";
-  reinforcementTileHashes = activeWorkType === "reinforcement" && data.reinforcementPoleLayout === "C-D-N-O-v65"
+  reinforcementTileHashes = activeWorkType === "reinforcement" &&
+    ["C-D-N-O-v65", "sheet-detail-v66"].includes(data.reinforcementPoleLayout)
     ? new Map(tileMeta.map(tile => [tile.file, tile.sha256 || "invalid"])) : new Map();
+  const headings = data.sheetDetailHeadings;
+  reinforcementSheetHeadings = activeWorkType === "reinforcement" && data.reinforcementPoleLayout === "sheet-detail-v66" &&
+    Array.isArray(headings) && headings.length === 10 && headings.every(h => typeof h === "string") ? headings : null;
   reinforcementTileFailures.clear();
   document.getElementById("kdn-map-data-warning")?.remove();
 }
@@ -2908,20 +2913,21 @@ function showDetail(idx) {
 window.showDetail = showDetail;
 
 
-function infoRowWithCopy(label, value, copyLabel) {
+function infoRowWithCopy(label, value, copyLabel, addressField) {
   const safeValue = escapeHtml(value || "-");
   const rawValue = encodeURIComponent(String(value || "")).replaceAll("'", "%27");
-  const isAddress = label === "주소" || label === "지번주소" || label === "도로명주소";
+  const isAddress = addressField ?? (label === "주소" || label === "지번주소" || label === "도로명주소");
+  const rawLabel = encodeURIComponent(String(copyLabel || "")).replaceAll("'", "%27");
   const mapUrl = `https://map.kakao.com/?q=${encodeURIComponent(String(value || "").trim())}`;
 
   return `
     <div style="display:flex;flex-direction:column;gap:4px;margin-bottom:8px;">
       <div style="word-break:break-word;">
-        <strong>${label}:</strong> ${safeValue}
+        ${label ? `<strong>${escapeHtml(label)}:</strong>` : ""} ${safeValue}
       </div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;">
         <button
-          onclick="copyFieldValue(decodeURIComponent('${rawValue}'), '${copyLabel}')"
+          onclick="copyFieldValue(decodeURIComponent('${rawValue}'), decodeURIComponent('${rawLabel}'))"
           style="border:1px solid #d1d5db;background:#fff;color:#111827;padding:4px 8px;border-radius:8px;font-size:11px;cursor:pointer;">
           복사
         </button>
@@ -2932,6 +2938,22 @@ function infoRowWithCopy(label, value, copyLabel) {
       </div>
     </div>
   `;
+}
+
+function renderReinforcementSheetDetails(headings, rows, meterValues) {
+  const columns = ["B", "C", "D", "G", "H", "I", "J", "M", "N", "O"];
+  const values = rows.map(row => Array.isArray(row.sheetDetail) ? row.sheetDetail : []);
+  if (values.some(row => row.length !== columns.length)) return "<p>상세정보를 읽지 못했습니다. 지도를 새로고침해 주세요.</p>";
+  const common = [1, 2, 3, 4, 8, 9].filter(i => values.every(row => row[i] === values[0][i]));
+  const field = (row, i) => infoRowWithCopy(headings[i], row[i], headings[i] || columns[i] + "열", i === 3 || i === 4);
+  const perMeter = [7, 0, 5, 6, ...[1, 2, 3, 4, 8, 9].filter(i => !common.includes(i))];
+  return `<div class="common-meter-info">${common.map(i => field(values[0], i)).join("")}</div>` +
+    values.map((row, index) => {
+      const status = meterValues[index]?.status;
+      return `<div class="meter-item" style="margin-top:8px;padding:10px;border:1px solid #e5e7eb;border-radius:8px;">
+        ${status ? `<span style="font-size:11px;color:#475569;">${renderStatusPickerLabel({value: status, textContent: getStatusOptionLabel(status)})}</span>` : ""}
+        ${perMeter.map(i => field(row, i)).join("")}</div>`;
+    }).join("");
 }
 
 
@@ -3609,6 +3631,8 @@ function renderInfo(group) {
 
         <div id="detail-${bucketIndex}" class="detail-box"
           style="display:${open};margin-top:8px;padding:10px;border:1px solid #e5e7eb;border-radius:10px;background:#fff;font-size:12px;line-height:1.6;word-break:break-word;">
+          ${activeWorkType === "reinforcement" && reinforcementSheetHeadings ?
+            renderReinforcementSheetDetails(reinforcementSheetHeadings, bucket.rows, meterValues) : `
           <div class="common-meter-info">
             ${infoRowWithCopy("인입주명", commonValue("inflowName") || group.b || "-", "인입주명")}
             ${infoRowWithCopy(inflowNoLabel, (poleInfo?.inflowNo ?? (commonValue("inflowNo") || legacyGroupNo)) || "-", inflowNoLabel)}
@@ -3620,6 +3644,7 @@ function renderInfo(group) {
           </div>
           ${infoRowsWithIndividualCopy("계기번호", meterValues, "계기번호")}
           ${renderExtraWorkDetails(bucket)}
+          `}
         </div>
       </div>
     `;

@@ -19,21 +19,21 @@ function bindFiles(root,cb){const el=root.querySelector("input[type=file]"),labe
  el.onchange=()=>pick(el.files);label.ondragover=e=>{e.preventDefault();label.classList.add("hot");};label.ondragleave=()=>label.classList.remove("hot");label.ondrop=e=>{e.preventDefault();label.classList.remove("hot");pick(e.dataTransfer.files);};}
 function notice(node,msg,bad=false){if(!node)return;node.className="notice"+(bad?" err":"");node.textContent=msg||"";}
 const INDEX_NAMES={reinforcement:"tiles_index.json",low_voltage:"low_tiles_index.json",high_voltage:"high_tiles_index.json",relay_table:"relay_tiles_index.json"};
-const REINFORCEMENT_POLE_LAYOUT="C-D-N-O-v65";
-const POLE_FIELDS=[["C","인입주명","inflowName"],["D","인입주전산화번호","inflowNo"],["N","변대전산화번호","poleTransformerNo"],["O","변대주명","o"]];
+const REINFORCEMENT_POLE_LAYOUT="sheet-detail-v66";
+const POLE_FIELDS=["B","C","D","G","H","I","J","M","N","O"];
 export function reinforcementPolePreview(part,report,files){
  if(part!=="reinforcement")return "";
  const p=report?.pole_preview,index=files.find(f=>f.name===INDEX_NAMES.reinforcement);
  if(p?.layout!==REINFORCEMENT_POLE_LAYOUT||!index||
     JSON.parse(new TextDecoder().decode(index.bytes)).reinforcementPoleLayout!==REINFORCEMENT_POLE_LAYOUT)
   throw Error("보강공사 변환 파일이 이전 버전입니다. 웹 파일 배포 완료 후 새로고침하고 엑셀을 다시 검사하세요.");
- const headers=POLE_FIELDS.map(([col,label,field])=>{
-  const c=p.columns.find(x=>x.field===field);
-  return [col+"열 → "+label,(c?.heading||"제목 없음")+" · "+num(c?.filled)+" / "+num(p.total)+"행 입력"];
+ const headers=POLE_FIELDS.map(col=>{
+  const c=p.columns.find(x=>x.field===col);
+  return [col+"열",(c?.heading||"제목 없음")+" · "+num(c?.filled)+" / "+num(p.total)+"행 입력"];
  });
  return '<h4>보강공사 엑셀에서 읽은 값</h4>'+kv(headers)+
-  '<p class="mini">현재상태가 있는 반영 행의 앞 '+num(p.samples.length)+'건입니다. 값이 다르면 반영하기 전에 엑셀의 실제 C·D·N·O열을 확인하세요.</p>'+
-  p.samples.map((r,i)=>'<details '+(!i?"open":"")+'><summary>예시 '+(i+1)+'</summary>'+kv(POLE_FIELDS.map(([col,label,field])=>[col+"열 "+label,r[field]||"(빈칸)"]))+'</details>').join("");
+  '<p class="mini">현재상태가 있는 반영 행의 앞 '+num(p.samples.length)+'건입니다.</p>'+
+  p.samples.map((r,i)=>'<details '+(!i?"open":"")+'><summary>예시 '+(i+1)+'</summary>'+kv(POLE_FIELDS.map(col=>[col+"열 "+(p.columns.find(x=>x.field===col)?.heading||""),r[col]||"(빈칸)"]))+'</details>').join("");
 }
 const digest=async bytes=>Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256",bytes)),v=>v.toString(16).padStart(2,"0")).join("");
 export async function prepareMapPublish(part,files){
@@ -178,7 +178,7 @@ export function mount(host,options){
   }
   function setfile(f,err){if(busy)return;resetWatch();file=f[0]||null;converted=null;ticket="";stats.textContent="파일을 검사하면 반영 건수를 확인할 수 있습니다.";notice(msg,err||rule);controls();}
   bindFiles(el,setfile);bindParts(el,p=>{done();upload(p);});
-  function convert(){return new Promise((resolve,reject)=>{worker=new Worker(new URL("./excel-worker.js?v=reinforcement-data-check-v65",location.href));worker.onmessage=({data})=>{if(closed)return;if(data.type==="status")notice(msg,data.text);else if(data.type==="done")resolve(data);else if(data.type==="error")reject(Error(data.text));};worker.onerror=()=>reject(Error("엑셀 변환기를 시작하지 못했습니다."));worker.postMessage({file,part});});}
+  function convert(){return new Promise((resolve,reject)=>{worker=new Worker(new URL("./excel-worker.js?v=reinforcement-sheet-detail-v66",location.href));worker.onmessage=({data})=>{if(closed)return;if(data.type==="status")notice(msg,data.text);else if(data.type==="done")resolve(data);else if(data.type==="error")reject(Error(data.text));};worker.onerror=()=>reject(Error("엑셀 변환기를 시작하지 못했습니다."));worker.postMessage({file,part});});}
   async function inspect(){
    if(busy||rule)return;resetWatch();busy=true;converted=null;controls();
    try{if(!file||!file.name.toLowerCase().endsWith(".xlsx"))throw Error(".xlsx 파일을 선택하세요.");if(options.preview)throw Error("화면 미리보기에서는 실제 엑셀을 처리하지 않습니다.");
