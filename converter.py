@@ -39,6 +39,32 @@ EXTRA_COLS = [
 
 # Fixed 0-based columns for the reinforcement detail display: C, D, N, O.
 REINFORCEMENT_POLE_COLUMNS = {"inflowName": 2, "inflowNo": 3, "poleTransformerNo": 13, "o": 14}
+REINFORCEMENT_POLE_LAYOUT = "C-D-N-O-v64"
+
+
+def reinforcement_pole_preview(groups, headers):
+    fields = tuple(REINFORCEMENT_POLE_COLUMNS)
+    counts = dict.fromkeys(fields, 0)
+    samples = []
+    total = 0
+    for group in groups:
+        for row in group["rows"]:
+            if not row["k"]:
+                continue
+            total += 1
+            for field in fields:
+                counts[field] += row[field] not in {"", "-", "–", "—"}
+            if len(samples) < 3:
+                samples.append({field: row[field][:160] for field in fields})
+    return {
+        "layout": REINFORCEMENT_POLE_LAYOUT,
+        "total": total,
+        "columns": [
+            {"field": field, "heading": str(headers[index] or "")[:100], "filled": counts[field]}
+            for field, index in REINFORCEMENT_POLE_COLUMNS.items()
+        ],
+        "samples": samples,
+    }
 
 
 def excel_display_string(cell):
@@ -526,11 +552,9 @@ def convert_sheet(ws, sheet_name, config):
 
         if work_type == "reinforcement":
             for field, index in REINFORCEMENT_POLE_COLUMNS.items():
-                value = excel_display_string(row[index] if index < len(row) else None)
                 # Keep n2 and statusGroupNo intact for existing Firebase record keys.
-                # Omit the separate display value only if n2 already represents N.
-                if field != "poleTransformerNo" or value != transformer_code:
-                    row_data[field] = value
+                # Always write the display field, even when N is blank.
+                row_data[field] = excel_display_string(row[index] if index < len(row) else None)
 
         # 보강공사만: 엑셀의 실제 P열에 '3상'이 있으면 마커용 플래그만 추가합니다.
         # 기존 필드/표시/상태 로직은 변경하지 않습니다.
@@ -630,6 +654,8 @@ def convert_sheet(ws, sheet_name, config):
     }
     if work_type != "reinforcement":
         index_data.update({"workType": work_type, "sheet": sheet_name})
+    else:
+        index_data["reinforcementPoleLayout"] = REINFORCEMENT_POLE_LAYOUT
     write_json_file(os.path.join(output_dir, f"{prefix}tiles_index.json"), index_data)
     write_json_file(os.path.join(output_dir, f"{prefix}branches.json"), branch_meta)
 
@@ -643,6 +669,7 @@ def convert_sheet(ws, sheet_name, config):
         "skipped_no_id": skipped_no_id,
         "coordinate_source": coordinate_source,
         "removed_priority_duplicates": removed_priority_duplicates,
+        **({"pole_preview": reinforcement_pole_preview(groups_list, headers)} if work_type == "reinforcement" else {}),
     }
 
 

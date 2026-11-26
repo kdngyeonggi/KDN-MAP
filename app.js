@@ -177,6 +177,7 @@ const MARKER_RENDER_BATCH = 200;
 const MARKER_RENDER_BUDGET_MS = 10;
 const STORAGE_KEY = "kdn_status_overrides_v1";
 const MEMO_STORAGE_KEY = "kdn_marker_memos_v1";
+let reinforcementTileVersion = "";
 
 function withDataVersion(file) {
   const version = sessionStorage.getItem("kdn_data_version_v1") || String(Date.now());
@@ -186,9 +187,20 @@ function withDataVersion(file) {
 }
 
 async function fetchJsonFresh(file) {
-  const response = await fetch(withDataVersion(file), { cache: "no-store" });
+  let url = withDataVersion(file);
+  if (activeWorkType === "reinforcement") {
+    if (file === "tiles_index.json" || file === "branches.json") url += "&list=" + Date.now();
+    else if (reinforcementTileVersion) url += "&publish=" + reinforcementTileVersion;
+  }
+  const response = await fetch(url, { cache: "no-store" });
   if (!response.ok) throw new Error(`JSON 로드 실패: ${file}`);
   return response.json();
+}
+
+function installTileIndex(data) {
+  tileMeta = data.tiles || [];
+  reinforcementTileVersion = activeWorkType === "reinforcement" && /^[a-f0-9]{64}$/.test(data.kdnPublishDigest || "")
+    ? data.kdnPublishDigest : "";
 }
 
 const REGION_BRANCHES = {
@@ -2443,7 +2455,7 @@ async function reloadActiveWorkTypeData() {
       fetchJsonFresh(resolveDataFile("tiles_index.json")),
       fetchJsonFresh(resolveDataFile("branches.json")).catch(() => [])
     ]);
-    tileMeta = tileData.tiles || [];
+    installTileIndex(tileData);
     branchMeta = Array.isArray(branchData) ? branchData : [];
 
     ensureUI();
@@ -2492,7 +2504,7 @@ async function switchWorkType(type) {
       fetchJsonFresh(resolveDataFile("tiles_index.json")),
       fetchJsonFresh(resolveDataFile("branches.json")).catch(() => [])
     ]);
-    tileMeta = tileData.tiles || [];
+    installTileIndex(tileData);
     branchMeta = Array.isArray(branchData) ? branchData : [];
 
     ensureUI();
@@ -4285,7 +4297,7 @@ function init() {
     fetchJsonFresh(resolveDataFile("tiles_index.json")),
     fetchJsonFresh(resolveDataFile("branches.json")).catch(() => [])
   ]).then(([tileData, branchData]) => {
-    tileMeta = tileData.tiles || [];
+    installTileIndex(tileData);
     branchMeta = Array.isArray(branchData) ? branchData : [];
     ensureUI();
     initAuthSync();
