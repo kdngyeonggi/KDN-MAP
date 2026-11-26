@@ -19,7 +19,7 @@ function bindFiles(root,cb){const el=root.querySelector("input[type=file]"),labe
  el.onchange=()=>pick(el.files);label.ondragover=e=>{e.preventDefault();label.classList.add("hot");};label.ondragleave=()=>label.classList.remove("hot");label.ondrop=e=>{e.preventDefault();label.classList.remove("hot");pick(e.dataTransfer.files);};}
 function notice(node,msg,bad=false){if(!node)return;node.className="notice"+(bad?" err":"");node.textContent=msg||"";}
 const INDEX_NAMES={reinforcement:"tiles_index.json",low_voltage:"low_tiles_index.json",high_voltage:"high_tiles_index.json",relay_table:"relay_tiles_index.json"};
-const REINFORCEMENT_POLE_LAYOUT="C-D-N-O-v64";
+const REINFORCEMENT_POLE_LAYOUT="C-D-N-O-v65";
 const POLE_FIELDS=[["C","인입주명","inflowName"],["D","인입주전산화번호","inflowNo"],["N","변대전산화번호","poleTransformerNo"],["O","변대주명","o"]];
 export function reinforcementPolePreview(part,report,files){
  if(part!=="reinforcement")return "";
@@ -43,10 +43,17 @@ export async function prepareMapPublish(part,files){
  for(const f of files)if(f!==index)inventory.push([f.name,await digest(f.bytes)]);
  inventory.sort(([a],[b])=>a<b?-1:a>b?1:0);
  const encoder=new TextEncoder(),data=JSON.parse(new TextDecoder().decode(index.bytes));
+ const checks=part==="reinforcement"&&data.reinforcementPoleLayout===REINFORCEMENT_POLE_LAYOUT
+  ? data.tiles.map(t=>({name:t.file,expected:t.sha256})) : [];
+ if(checks.length){
+  const byName=new Map(inventory);
+  if(checks.some(x=>!x.expected||byName.get(x.name)!==x.expected))
+   throw Error("보강공사 목록과 실제 데이터 파일이 일치하지 않습니다. 엑셀을 다시 검사하세요.");
+ }
  // Fingerprint all map data so an unchanged row count cannot confirm a stale deployment.
  data.kdnPublishDigest=await digest(encoder.encode(JSON.stringify(inventory)));
  const bytes=encoder.encode(JSON.stringify(data)).buffer;
- return {files:files.map(f=>f===index?{...f,bytes}:f),name,expected:await digest(bytes)};
+ return {files:files.map(f=>f===index?{...f,bytes}:f),name,expected:await digest(bytes),checks};
 }
 export async function deployedMapMatches(name,expected,signal){
  const url=new URL("./"+name,location.href);
@@ -141,14 +148,28 @@ export function mount(host,options){
    const controller=new AbortController(),signal=controller.signal;watch=controller;retry.hidden=true;
    const label=PARTS[part],deadline=Date.now()+12*60*1000;
    notice(msg,label+" · 저장소 반영 완료. 지도 배포를 확인하는 중…");
+   const verified=new Set();
    try{
     while(!signal.aborted&&Date.now()<deadline){
      let matches=false;
      try{matches=await deployedMapMatches(check.name,check.expected,AbortSignal.any([signal,AbortSignal.timeout(8000)]));}catch{}
      if(signal.aborted)return;
      if(matches){
-      notice(msg,label+(check.clear?" · 리스트 지우기 완료":check.changed?" · 새로운 리스트 적용 완료":" · 기존 리스트와 동일하며 지도에 적용되어 있습니다."));
-      return;
+      const checks=check.checks||[];
+      for(const tile of checks){
+       if(signal.aborted||Date.now()>=deadline)break;
+       if(verified.has(tile.name))continue;
+       notice(msg,label+" · 지도 데이터 확인 "+num(verified.size)+" / "+num(checks.length));
+       let tileMatches=false;
+       try{tileMatches=await deployedMapMatches(tile.name,tile.expected,AbortSignal.any([signal,AbortSignal.timeout(45000)]));}catch{}
+       if(!tileMatches)break;
+       verified.add(tile.name);
+      }
+      if(signal.aborted)return;
+      if(verified.size===checks.length){
+       notice(msg,label+(check.clear?" · 리스트 지우기 완료":check.changed?" · 새로운 리스트 적용 완료":" · 기존 리스트와 동일하며 지도에 적용되어 있습니다."));
+       return;
+      }
      }
      await delayCheck(10000,signal);
     }
@@ -157,7 +178,7 @@ export function mount(host,options){
   }
   function setfile(f,err){if(busy)return;resetWatch();file=f[0]||null;converted=null;ticket="";stats.textContent="파일을 검사하면 반영 건수를 확인할 수 있습니다.";notice(msg,err||rule);controls();}
   bindFiles(el,setfile);bindParts(el,p=>{done();upload(p);});
-  function convert(){return new Promise((resolve,reject)=>{worker=new Worker(new URL("./excel-worker.js?v=reinforcement-poles-verified-v64",location.href));worker.onmessage=({data})=>{if(closed)return;if(data.type==="status")notice(msg,data.text);else if(data.type==="done")resolve(data);else if(data.type==="error")reject(Error(data.text));};worker.onerror=()=>reject(Error("엑셀 변환기를 시작하지 못했습니다."));worker.postMessage({file,part});});}
+  function convert(){return new Promise((resolve,reject)=>{worker=new Worker(new URL("./excel-worker.js?v=reinforcement-data-check-v65",location.href));worker.onmessage=({data})=>{if(closed)return;if(data.type==="status")notice(msg,data.text);else if(data.type==="done")resolve(data);else if(data.type==="error")reject(Error(data.text));};worker.onerror=()=>reject(Error("엑셀 변환기를 시작하지 못했습니다."));worker.postMessage({file,part});});}
   async function inspect(){
    if(busy||rule)return;resetWatch();busy=true;converted=null;controls();
    try{if(!file||!file.name.toLowerCase().endsWith(".xlsx"))throw Error(".xlsx 파일을 선택하세요.");if(options.preview)throw Error("화면 미리보기에서는 실제 엑셀을 처리하지 않습니다.");
@@ -198,7 +219,7 @@ export function mount(host,options){
     if(closed)return;committing=true;notice(msg,"선택한 파트를 한 번에 반영하는 중…");
     const result=await api("/api/publish/commit",{method:"POST",body:{part,ticket,receipts}});
     converted=null;ticket="";
-    if(!closed){pending={name:prepared.name,expected:prepared.expected,changed:result.changed};void verifyDeployment();}
+    if(!closed){pending={name:prepared.name,expected:prepared.expected,changed:result.changed,checks:prepared.checks};void verifyDeployment();}
    }catch(e){converted=null;ticket="";if(!closed)notice(msg,e.message+(committing?" 최종 반영 여부를 확인한 뒤 다시 검사하세요.":" 다시 검사한 뒤 시도하세요."),true);}
    finally{busy=false;if(!closed)controls();}
   }

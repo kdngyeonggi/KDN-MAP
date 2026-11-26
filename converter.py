@@ -39,7 +39,7 @@ EXTRA_COLS = [
 
 # Fixed 0-based columns for the reinforcement detail display: C, D, N, O.
 REINFORCEMENT_POLE_COLUMNS = {"inflowName": 2, "inflowNo": 3, "poleTransformerNo": 13, "o": 14}
-REINFORCEMENT_POLE_LAYOUT = "C-D-N-O-v64"
+REINFORCEMENT_POLE_LAYOUT = "C-D-N-O-v65"
 
 
 def reinforcement_pole_preview(groups, headers):
@@ -363,7 +363,7 @@ def iter_group_payloads(group, max_bytes):
         yield head + b",".join(rows) + b"]}", len(rows)
 
 
-def write_packed_tiles(groups_list, output_dir, prefix, max_bytes=MAX_JSON_BYTES):
+def write_packed_tiles(groups_list, output_dir, prefix, max_bytes=MAX_JSON_BYTES, *, versioned=False):
     """가까운 지역부터 채워 시트별 JSON 개수를 줄이고 실제 바이트 상한을 지킵니다."""
     if not isinstance(max_bytes, int) or not 2 < max_bytes <= MAX_JSON_BYTES:
         raise ValueError("JSON 최대 크기는 24,500,000바이트 이하여야 합니다.")
@@ -377,12 +377,31 @@ def write_packed_tiles(groups_list, output_dir, prefix, max_bytes=MAX_JSON_BYTES
     size = 2
     row_count = 0
     bounds = None
+    used_names = set()
 
     def flush():
         nonlocal payloads, size, row_count, bounds
         if not payloads:
             return
-        name = f"{prefix}tile_part_{len(index) + 1:04d}.json"
+        metadata = {}
+        if versioned:
+            checksum = hashlib.sha256(b"[")
+            for i, payload in enumerate(payloads):
+                if i:
+                    checksum.update(b",")
+                checksum.update(payload)
+            checksum.update(b"]")
+            hex_digest = checksum.hexdigest()
+            # The publishing API accepts up to nine numeric digits in tile filenames.
+            number = int(hex_digest[:16], 16) % 900_000_000
+            name = f"{prefix}tile_part_{100_000_000 + number}.json"
+            while name in used_names:
+                number = (number + 1) % 900_000_000
+                name = f"{prefix}tile_part_{100_000_000 + number}.json"
+            used_names.add(name)
+            metadata["sha256"] = hex_digest
+        else:
+            name = f"{prefix}tile_part_{len(index) + 1:04d}.json"
         with open(os.path.join(output_dir, name), "wb") as stream:
             stream.write(b"[")
             for i, payload in enumerate(payloads):
@@ -392,7 +411,7 @@ def write_packed_tiles(groups_list, output_dir, prefix, max_bytes=MAX_JSON_BYTES
             stream.write(b"]")
         index.append({
             "id": name[:-5], "file": name, **bounds,
-            "count": len(payloads), "rows": row_count, "sizeBytes": size
+            "count": len(payloads), "rows": row_count, "sizeBytes": size, **metadata
         })
         payloads = []
         size = 2
@@ -647,7 +666,8 @@ def convert_sheet(ws, sheet_name, config):
             "level": 7
         })
 
-    tile_index = write_packed_tiles(groups_list, output_dir, prefix, config.get("max_json_bytes", MAX_JSON_BYTES))
+    tile_index = write_packed_tiles(groups_list, output_dir, prefix, config.get("max_json_bytes", MAX_JSON_BYTES),
+                                   versioned=work_type == "reinforcement")
     index_data = {
         "step": STEP, "layout": "packed-v1", "maxFileBytes": config.get("max_json_bytes", MAX_JSON_BYTES),
         "grouping": "coordinate-v1", "tiles": tile_index

@@ -43,7 +43,7 @@ self.onmessage=async({data})=>{
   await py.loadPackage(["hashlib"],{messageCallback:()=>{}});
   py.FS.mkdirTree("/wheels");py.FS.mkdirTree("/app");py.FS.mkdirTree("/out");py.FS.mkdirTree("/input");
   await Promise.all(["openpyxl-3.1.5-py2.py3-none-any.whl","et_xmlfile-2.0.0-py3-none-any.whl","defusedxml-0.7.1-py2.py3-none-any.whl"].map(async n=>py.unpackArchive(await(await get(runtime+n)).arrayBuffer(),"zip",{extractDir:"/wheels"})));
-  const code=await(await get(new URL("./converter.py?v=reinforcement-poles-verified-v64",self.location.href))).text();
+  const code=await(await get(new URL("./converter.py?v=reinforcement-data-check-v65",self.location.href))).text();
   py.FS.writeFile("/app/converter.py",code);
   if(py.FS.filesystems.WORKERFS)py.FS.mount(py.FS.filesystems.WORKERFS,{blobs:[{name:"source.xlsx",data:file}]},"/input");
   else py.FS.writeFile("/input/source.xlsx",new Uint8Array(await file.arrayBuffer()));

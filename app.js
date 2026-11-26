@@ -178,6 +178,8 @@ const MARKER_RENDER_BUDGET_MS = 10;
 const STORAGE_KEY = "kdn_status_overrides_v1";
 const MEMO_STORAGE_KEY = "kdn_marker_memos_v1";
 let reinforcementTileVersion = "";
+let reinforcementTileHashes = new Map();
+const reinforcementTileFailures = new Set();
 
 function withDataVersion(file) {
   const version = sessionStorage.getItem("kdn_data_version_v1") || String(Date.now());
@@ -201,6 +203,45 @@ function installTileIndex(data) {
   tileMeta = data.tiles || [];
   reinforcementTileVersion = activeWorkType === "reinforcement" && /^[a-f0-9]{64}$/.test(data.kdnPublishDigest || "")
     ? data.kdnPublishDigest : "";
+  reinforcementTileHashes = activeWorkType === "reinforcement" && data.reinforcementPoleLayout === "C-D-N-O-v65"
+    ? new Map(tileMeta.map(tile => [tile.file, tile.sha256 || "invalid"])) : new Map();
+  reinforcementTileFailures.clear();
+  document.getElementById("kdn-map-data-warning")?.remove();
+}
+
+async function fetchCheckedReinforcementTile(file, expected) {
+  const url = new URL(file, location.href);
+  url.searchParams.set("sha256", expected);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt) url.searchParams.set("retry", String(Date.now()));
+    try {
+      const res = await fetch(url, { cache: "no-store" });
+      if (!res.ok) continue;
+      const raw = await res.arrayBuffer();
+      const received = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", raw)),
+        value => value.toString(16).padStart(2, "0")).join("");
+      if (received === expected) return JSON.parse(new TextDecoder().decode(raw));
+    } catch { /* Retry once, then keep unverified data off the map. */ }
+  }
+  return null;
+}
+
+function showReinforcementTileWarning() {
+  const id = "kdn-map-data-warning";
+  let warning = document.getElementById(id);
+  if (!reinforcementTileFailures.size) { warning?.remove(); return; }
+  if (warning) return;
+  warning = document.createElement("div");
+  warning.id = id;
+  warning.setAttribute("role", "alert");
+  warning.style.cssText = "position:fixed;bottom:52px;left:12px;z-index:10020;max-width:calc(100% - 24px);padding:10px;background:#fff4d5;border:1px solid #957128;border-radius:8px;color:#3b2d12;font:14px sans-serif";
+  warning.append("보강공사 최신 데이터 일부를 확인하지 못했습니다. ");
+  const retry = document.createElement("button");
+  retry.type = "button";
+  retry.textContent = "지도 다시 열기";
+  retry.onclick = () => location.reload();
+  warning.append(retry);
+  document.body.append(warning);
 }
 
 const REGION_BRANCHES = {
@@ -3998,9 +4039,19 @@ async function loadTiles(files) {
     if (requestLoaded.has(file)) continue;
 
     if (!requestLoading.has(file)) {
-      const loadPromise = fetchJsonFresh(resolveDataFile(file))
+      const expected = requestType === "reinforcement" && reinforcementTileHashes.get(file);
+      const tile = expected ? fetchCheckedReinforcementTile(file, expected) : fetchJsonFresh(resolveDataFile(file));
+      const loadPromise = tile
         .then(d => {
           if (!isCurrentRequest()) return;
+          if (expected) {
+            if (d === null) {
+              reinforcementTileFailures.add(file);
+              showReinforcementTileWarning();
+              return;
+            }
+            if (reinforcementTileFailures.delete(file)) showReinforcementTileWarning();
+          }
           (Array.isArray(d) ? d : []).forEach(mergeLoadedGroup);
           requestLoaded.set(file, true);
         })
