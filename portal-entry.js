@@ -62,7 +62,7 @@ onAuthStateChanged(auth,async user=>{
       window.KDN_CONTEXT.roster=(await api("/api/workers")).workers;
      }
      await mapSdk();if(n!==serial)return;host.hidden=true;document.querySelector("#map").hidden=false;document.body.classList.add("map-screen");
-     await import("./app.js?v=reinforcement-sheet-detail-v66");
+     await import("./app.js?v=reinforcement-priority3-v67");
    }
  }catch(e){if(!blocked)fail(e);}
 });

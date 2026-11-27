@@ -2942,7 +2942,15 @@ function infoRowWithCopy(label, value, copyLabel, addressField) {
 
 function renderReinforcementSheetDetails(headings, rows, meterValues) {
   const columns = ["B", "C", "D", "G", "H", "I", "J", "M", "N", "O"];
-  const values = rows.map(row => Array.isArray(row.sheetDetail) ? row.sheetDetail : []);
+  const values = rows.map(row => {
+    const cells = Array.isArray(row.sheetDetail) ? row.sheetDetail : [];
+    if (cells.length !== columns.length || getOriginalRowStatus(row) !== "계기교체(3순위)") return cells;
+    // Some priority-3 records contain the pole name followed by the pole number.
+    // Normalize the display copy before grouping, never the source row or work history.
+    const [nameCandidate, numberCandidate] = cells.slice(8);
+    if (!/[가-힣]/u.test(nameCandidate) || !/^(?:[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*|-|–|—)?$/.test(numberCandidate)) return cells;
+    return [...cells.slice(0, 8), numberCandidate, nameCandidate];
+  });
   if (values.some(row => row.length !== columns.length)) return "<p>상세정보를 읽지 못했습니다. 지도를 새로고침해 주세요.</p>";
   const common = [1, 2, 3, 4, 8, 9].filter(i => values.every(row => row[i] === values[0][i]));
   const field = (row, i) => infoRowWithCopy(headings[i], row[i], headings[i] || columns[i] + "열", i === 3 || i === 4);
