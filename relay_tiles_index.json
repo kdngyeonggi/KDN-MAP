@@ -1,1 +1,1 @@
-{"layout":"packed-v1","grouping":"coordinate-v1","workType":"relay_table","tiles":[]}
+{"step":0.125,"layout":"packed-v1","maxFileBytes":24500000,"grouping":"coordinate-v1","tiles":[{"id":"relay_tile_part_0001","file":"relay_tile_part_0001.json","minLat":37.0911417074862,"maxLat":37.5006119344862,"minLng":127.007212445912,"maxLng":127.577405832878,"count":25,"rows":28,"sizeBytes":28582}],"workType":"relay_table","sheet":"보강공사_중계표","kdnPublishDigest":"fb22d119c9ed9a13a47a692c7f1e1c4f6c7fb11d0e747c46351e459bd42d045b"}
